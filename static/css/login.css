@@ -1760,17 +1760,16 @@ body {
 }
 
 /* ============================================================
-   PASSWORD ROW — hidden unless a password is actually required
-   (revealed by login.js after /api/me reports default_auth:false)
+   PASSWORD ROW — always visible (password-only login, default TiTaN)
 ============================================================ */
 
 .password-row {
-    display: none;
+    display: flex !important;
     margin-top: clamp(16px, 2vh, 24px);
 }
 
 .password-row.visible {
-    display: flex;
+    display: flex !important;
 }
 
 

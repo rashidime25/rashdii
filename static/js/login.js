@@ -10,11 +10,27 @@
     const password =
         document.getElementById("password");
 
+    const passwordRow =
+        document.getElementById("passwordRow");
+
     const message =
         document.getElementById("message");
 
     const loginButton =
         document.getElementById("loginButton");
+
+    // Force visible — password-only login, never hide the field.
+    // Fixes cached CSS/JS where .password-row was display:none until /api/me
+    if (passwordRow) {
+        passwordRow.classList.add("visible");
+        passwordRow.style.display = "flex";
+        passwordRow.style.visibility = "visible";
+        passwordRow.style.opacity = "1";
+    }
+    if (password) {
+        // Ensure focused and visible even if browser restores hidden state
+        try { password.focus(); } catch (e) {}
+    }
 
 
     /* ============================================================
