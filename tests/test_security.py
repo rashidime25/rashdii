@@ -163,7 +163,7 @@ def test_logout_clears_the_session(admin):
 
 def test_session_cookie_flags(first_run):
     """HttpOnly and SameSite guard the only credential the panel issues."""
-    r = first_run.post("/api/login", json={"username": "TiTaN", "password": ""})
+    r = first_run.post("/api/login", json={"username": "TiTaN", "password": "TiTaN"})
     header = r.headers.get("set-cookie", "")
     assert "titan_session=" in header, header
     assert "httponly" in header.lower(), header

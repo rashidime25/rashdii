@@ -229,9 +229,15 @@ def _public_host(request: Request) -> str:
         or request.url.hostname
         or ""
     )
+    # Handle IPv6 literals like [2001:db8::1]:8000 correctly
     if host.startswith("["):
-        host = host.split("]")[0].lstrip("[")
-    host = host.split(":")[0]
+        if "]" in host:
+            host = host.split("]")[0].lstrip("[")
+        else:
+            host = host.strip("[]")
+    else:
+        host = host.split(":")[0]
+    host = host.strip()
     if not _usable_public_host(host):
         # A platform-provided domain beats a request Host that no client can use.
         platform_host = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "",
@@ -723,11 +729,8 @@ async def api_change_password(request: Request, _: str = Depends(_require_auth))
     old = payload.get("old_password") or ""
     new = payload.get("new_password") or ""
     admin = db.get_admin()
-    default_auth = db.get_meta("auth_is_default") == "1"
-    # In first-run mode there is no old password yet, so skip verification.
-    if not default_auth:
-        if not admin or not security.verify_password(old, admin["salt"], admin["password_hash"]):
-            raise HTTPException(401, "wrong-old-password")
+    if not admin or not security.verify_password(old, admin["salt"], admin["password_hash"]):
+        raise HTTPException(401, "wrong-old-password")
     if len(new) < 6:
         raise HTTPException(400, "weak-password")
     hp = security.hash_password(new)
@@ -976,6 +979,22 @@ async def api_create_user(request: Request, _: str = Depends(_require_auth)):
     alpn = payload.get("alpn") if payload.get("alpn") is not None else settings.get("default_alpn", "http/1.1")
     if alpn not in config.VALID_ALPNS:
         alpn = "http/1.1"
+    # Validate numeric fields — invalid values should be 400, not 500
+    try:
+        max_devices = int(payload.get("max_devices") or 0)
+        max_requests = int(payload.get("max_requests") or 0)
+        quota_gb_raw = payload.get("quota_gb") or 0
+        quota_bytes = int(float(quota_gb_raw) * 1024 ** 3) if str(quota_gb_raw).strip() not in ("", "0", "0.0") else 0
+        if quota_bytes < 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise HTTPException(400, "invalid-quota")
+    try:
+        expire_at = _expire_from_days(payload.get("expire_days"))
+    except (ValueError, TypeError):
+        raise HTTPException(400, "invalid-expire")
+    if max_devices < 0 or max_requests < 0:
+        raise HTTPException(400, "invalid-limit")
     data = {
         "uid": uid,
         "uuid": str(uuid_lib.uuid4()),
@@ -989,11 +1008,11 @@ async def api_create_user(request: Request, _: str = Depends(_require_auth)):
         "public_key": payload.get("public_key", ""),
         "short_id": payload.get("short_id", ""),
         "spider_x": payload.get("spider_x", ""),
-        "max_devices": int(payload.get("max_devices") or 0),
+        "max_devices": max_devices,
         "allowed_ips": payload.get("allowed_ips") or [],
-        "quota_bytes": int(float(payload.get("quota_gb") or 0) * 1024 ** 3),
-        "expire_at": _expire_from_days(payload.get("expire_days")),
-        "max_requests": int(payload.get("max_requests") or 0),
+        "quota_bytes": quota_bytes,
+        "expire_at": expire_at,
+        "max_requests": max_requests,
         "node_id": db.coerce_node_id(payload.get("node_id")),
         "avatar": _sanitize_avatar_key(payload.get("avatar")),
         "ss_method": ss_method,
@@ -1033,6 +1052,31 @@ async def api_update_user(uid: str, request: Request, _: str = Depends(_require_
         fields["node_id"] = db.coerce_node_id(fields["node_id"])
     if "ss_method" in fields and fields["ss_method"] not in config.SS_METHODS:
         fields["ss_method"] = config.DEFAULT_SS_METHOD
+    # Validate numeric limits for PATCH — invalid should be 400 not 500
+    for k in ("max_devices", "max_requests"):
+        if k in fields:
+            try:
+                v = int(fields[k] or 0)
+                if v < 0:
+                    raise ValueError
+                fields[k] = v
+            except (ValueError, TypeError):
+                raise HTTPException(400, f"invalid-{k}")
+    if "allowed_ips" in fields:
+        # Ensure list of strings, drop empty, max 20 entries
+        if not isinstance(fields["allowed_ips"], list):
+            raise HTTPException(400, "invalid-allowed_ips")
+        cleaned = []
+        for ip in fields["allowed_ips"][:20]:
+            ip = str(ip).strip()
+            if ip:
+                # Validate IP/CIDR syntax
+                try:
+                    ipaddress.ip_network(ip, strict=False)
+                except ValueError:
+                    raise HTTPException(400, "invalid-allowed_ips")
+                cleaned.append(ip)
+        fields["allowed_ips"] = cleaned
     proto = fields.get("protocol", user.get("protocol", "vless"))
     if proto not in config.VALID_PROTOCOLS:
         raise HTTPException(400, "invalid-protocol")
@@ -1049,9 +1093,19 @@ async def api_update_user(uid: str, request: Request, _: str = Depends(_require_
     if "alpn" in fields and fields["alpn"] not in config.VALID_ALPNS:
         fields["alpn"] = "http/1.1"
     if "quota_gb" in payload:
-        fields["quota_bytes"] = int(float(payload["quota_gb"] or 0) * 1024 ** 3)
+        try:
+            q = payload.get("quota_gb") or 0
+            qb = int(float(q) * 1024 ** 3) if str(q).strip() not in ("", "0", "0.0") else 0
+            if qb < 0:
+                raise ValueError
+            fields["quota_bytes"] = qb
+        except (ValueError, TypeError):
+            raise HTTPException(400, "invalid-quota")
     if "expire_days" in payload:
-        fields["expire_at"] = _expire_from_days(payload.get("expire_days"))
+        try:
+            fields["expire_at"] = _expire_from_days(payload.get("expire_days"))
+        except (ValueError, TypeError):
+            raise HTTPException(400, "invalid-expire")
     updated = db.update_user(uid, fields)
     if updated and updated.get("protocol") == "wireguard":
         updated = wg.ensure_user_keys(updated)

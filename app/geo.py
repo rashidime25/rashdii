@@ -37,17 +37,27 @@ def detect_location(address: str, timeout: float = 3.0) -> dict:
     if not host:
         return {}
     # strip scheme, path/query, port and any userinfo
+    # strip scheme, userinfo, path and port — keep IPv6 brackets handling
     host = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", host)
-    host = host.split("/", 1)[0].rsplit("@", 1)[-1]
-    host = re.sub(r":\d+$", "", host)
+    host = host.split("/", 1)[0].rsplit("@", 1)[-1].strip()
+    # Handle [IPv6]:port → IPv6
+    if host.startswith("[") and "]" in host:
+        host = host[1:host.index("]")]
+    else:
+        host = re.sub(r":\d+$", "", host)
     host = host.strip().strip("[]")
     if not host:
         return {}
     try:
-        if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", host):
+        # Use getaddrinfo to support both IPv4 and IPv6; prefer first result
+        if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", host) or ":" in host:
+            # Already an IP (v4 or v6)
             ip = host
+            # Validate
+            ipaddress.ip_address(ip)
         else:
-            ip = socket.gethostbyname(host)
+            infos = socket.getaddrinfo(host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
+            ip = infos[0][4][0] if infos else ""
         if _is_private(ip) or ip in ("0.0.0.0", "255.255.255.255"):
             return {}
         r = httpx.get(_IP_API.format(ip=ip), timeout=timeout)

@@ -118,18 +118,14 @@ def _clear_throttle(db):
 
 @pytest.fixture()
 def first_run(client, db):
-    """Panel exactly as a fresh deploy behaves: admin `TiTaN`, no password.
-
-    In this state the login endpoint accepts ANY password, which is why tests
-    about credentials must switch to `admin` instead.
-    """
+    """Panel exactly as a fresh deploy behaves: admin `TiTaN`, password `TiTaN`."""
     from app import security
-    hp = security.hash_password("")
+    hp = security.hash_password("TiTaN")
     db.set_admin("TiTaN", hp["hash"], hp["salt"])
     db.set_meta("auth_is_default", "1")
     _clear_throttle(db)
     client.cookies.clear()
-    r = client.post("/api/login", json={"username": "TiTaN", "password": ""})
+    r = client.post("/api/login", json={"username": "TiTaN", "password": "TiTaN"})
     assert r.status_code == 200, r.text
     yield client
     db.set_meta("auth_is_default", "1")
@@ -155,8 +151,8 @@ def admin(client, db):
     assert r.status_code == 200, r.text
     client._password = pw
     yield client
-    empty = security.hash_password("")
-    db.set_admin("TiTaN", empty["hash"], empty["salt"])
+    titan = security.hash_password("TiTaN")
+    db.set_admin("TiTaN", titan["hash"], titan["salt"])
     db.set_meta("auth_is_default", "1")
     _clear_throttle(db)
 

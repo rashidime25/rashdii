@@ -33,7 +33,7 @@ def check(name: str, cond: bool, observed: str = "") -> None:
     print(f"{mark:4}  {name}" + (f"\n        observed: {observed}" if not cond else ""))
 
 
-ADMIN_PW = os.environ.get("TITAN_ADMIN_PASSWORD", "")
+ADMIN_PW = os.environ.get("TITAN_ADMIN_PASSWORD", "TiTaN")
 
 
 @contextlib.contextmanager
@@ -98,7 +98,7 @@ def main() -> int:
     attacker.cookies.set("titan_session", token or "")
     new_pw = rpw()
     r = attacker.post("/api/change-password",
-                      json={"old_password": "", "new_password": new_pw},
+                      json={"old_password": "TiTaN", "new_password": new_pw},
                       headers={"Origin": "https://evil.example"})
     check("[2] cross-origin POST /api/change-password is rejected",
           r.status_code == 403 and r.json().get("detail") == "csrf-origin-rejected",
@@ -120,7 +120,7 @@ def main() -> int:
     # then CSRF must not be able to change it, and the write must truly not happen.
     good_pw = rpw()
     with session() as c:
-        r = c.post("/api/change-password", json={"old_password": "", "new_password": good_pw},
+        r = c.post("/api/change-password", json={"old_password": "TiTaN", "new_password": good_pw},
                    headers={"Origin": BASE})
         check("[3] legitimate same-origin password change works", r.status_code == 200,
               f"HTTP {r.status_code} {r.text[:100]}")
@@ -154,7 +154,7 @@ def main() -> int:
           burst >= 6.0 and all(c == 401 for c in codes),
           f"6 attempts took {burst}s, codes={set(codes)} (unfixed code: ~0.4s)")
     check("[4b] the throttle never blocks a correct password",
-          httpx.post(f"{BASE}/api/login", json={"username": ADMIN_USER, "password": ""},
+          httpx.post(f"{BASE}/api/login", json={"username": ADMIN_USER, "password": good_pw},
                      timeout=30).status_code in (200, 401), "")
 
     # audit-log injection: raw attempted username used to land in the log table

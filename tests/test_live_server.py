@@ -86,14 +86,14 @@ def live(tmp_path):
 def first_run_session(live):
     """Session for a panel that has no password yet (fresh bootstrapped DB)."""
     with httpx.Client(base_url=live, timeout=20) as c:
-        r = c.post("/api/login", json={"username": "TiTaN", "password": ""})
+        r = c.post("/api/login", json={"username": "TiTaN", "password": "TiTaN"})
         assert r.status_code == 200, r.text
         yield c
 
 
 def lock_password(client, pw: str) -> None:
     """Move a first-run panel to an enforced password (there is no API to unset)."""
-    r = client.post("/api/change-password", json={"old_password": "", "new_password": pw})
+    r = client.post("/api/change-password", json={"old_password": "TiTaN", "new_password": pw})
     assert r.status_code == 200, r.text
     client._pw = pw
 
@@ -149,13 +149,13 @@ def test_valid_login_is_not_penalised(live, first_run_session):
 def test_cross_origin_state_change_rejected_over_http(live):
     """Same-site cookie + preflight are not the control; the Origin check is."""
     with httpx.Client(base_url=live, timeout=20) as c:
-        c.post("/api/login", json={"username": "TiTaN", "password": ""})  # first-run session
-        r = c.post("/api/change-password", json={"old_password": "", "new_password": "zzz" + "q" * 6},
+        c.post("/api/login", json={"username": "TiTaN", "password": "TiTaN"})  # first-run session
+        r = c.post("/api/change-password", json={"old_password": "TiTaN", "new_password": "zzz" + "q" * 6},
                    headers={"Origin": "https://evil.example"})
         assert r.status_code == 403, (r.status_code, r.text)
         # and the write truly did not happen: the first-run login still works
         c2 = httpx.Client(base_url=live, timeout=15)
-        assert c2.post("/api/login", json={"username": "TiTaN", "password": ""}).status_code == 200
+        assert c2.post("/api/login", json={"username": "TiTaN", "password": "TiTaN"}).status_code == 200
 
 
 def test_swagger_is_not_served(live):
@@ -166,7 +166,7 @@ def test_swagger_is_not_served(live):
 def test_create_user_and_fetch_subscription_end_to_end(live):
     """The user-visible flow that must never regress: create -> link -> client pull."""
     with httpx.Client(base_url=live, timeout=15) as c:
-        assert c.post("/api/login", json={"username": "TiTaN", "password": ""}).status_code == 200
+        assert c.post("/api/login", json={"username": "TiTaN", "password": "TiTaN"}).status_code == 200
         r = c.post("/api/users", json={"name": "e2e", "protocol": "vless", "quota_gb": 3,
                                        "expire_days": 30})
         assert r.status_code == 200, r.text
