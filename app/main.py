@@ -9,6 +9,7 @@ import base64
 import gzip
 import io
 import json
+import math
 import os
 import re
 import secrets
@@ -763,6 +764,31 @@ async def api_set_settings(request: Request, _: str = Depends(_require_auth)):
             continue
         if k == "default_alpn" and v not in config.VALID_ALPNS:
             continue
+        if k == "public_domain":
+            v = str(v or "").strip()[:256]
+            if v:
+                low = v.lower()
+                if low.startswith(("javascript:", "data:", "vbscript:")):
+                    continue
+                host_part = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", v).split("/")[0].split(":")[0].strip("[]").strip()
+                if not host_part or any(c in v for c in ' <>"\''):
+                    continue
+                if len(host_part) > 253:
+                    continue
+            updates[k] = v
+            continue
+        if k == "public_port":
+            try:
+                pv = int(str(v).strip())
+                if not 1 <= pv <= 65535:
+                    continue
+                v = str(pv)
+            except (ValueError, TypeError, AttributeError):
+                continue
+        if k == "sni_override":
+            v = str(v or "").strip()[:256]
+            if v and any(c in v for c in ' <>"\''):
+                continue
         updates[k] = v
     db.set_settings(updates)
     # routing-affecting flags require an Xray reload
@@ -984,17 +1010,41 @@ async def api_create_user(request: Request, _: str = Depends(_require_auth)):
         max_devices = int(payload.get("max_devices") or 0)
         max_requests = int(payload.get("max_requests") or 0)
         quota_gb_raw = payload.get("quota_gb") or 0
-        quota_bytes = int(float(quota_gb_raw) * 1024 ** 3) if str(quota_gb_raw).strip() not in ("", "0", "0.0") else 0
-        if quota_bytes < 0:
+        qstr = str(quota_gb_raw).strip()
+        if qstr in ("", "0", "0.0"):
+            quota_bytes = 0
+        else:
+            fv = float(quota_gb_raw)
+            if not math.isfinite(fv):
+                raise ValueError
+            quota_bytes = int(fv * 1024 ** 3)
+        if quota_bytes < 0 or quota_bytes > (1 << 63) - 1:
             raise ValueError
-    except (ValueError, TypeError):
-        raise HTTPException(400, "invalid-quota")
+    except (ValueError, TypeError, OverflowError):
+        raise HTTPException(400, "invalid-quota") from None
     try:
         expire_at = _expire_from_days(payload.get("expire_days"))
     except (ValueError, TypeError):
-        raise HTTPException(400, "invalid-expire")
+        raise HTTPException(400, "invalid-expire") from None
     if max_devices < 0 or max_requests < 0:
         raise HTTPException(400, "invalid-limit")
+    # Validate allowed_ips on create (same as PATCH)
+    raw_allowed = payload.get("allowed_ips") or []
+    if raw_allowed:
+        if not isinstance(raw_allowed, list):
+            raise HTTPException(400, "invalid-allowed_ips") from None
+        cleaned_allowed = []
+        for ip in raw_allowed[:20]:
+            ip = str(ip).strip()
+            if ip:
+                try:
+                    ipaddress.ip_network(ip, strict=False)
+                except ValueError:
+                    raise HTTPException(400, "invalid-allowed_ips") from None
+                cleaned_allowed.append(ip)
+        raw_allowed = cleaned_allowed
+    else:
+        raw_allowed = []
     data = {
         "uid": uid,
         "uuid": str(uuid_lib.uuid4()),
@@ -1009,7 +1059,7 @@ async def api_create_user(request: Request, _: str = Depends(_require_auth)):
         "short_id": payload.get("short_id", ""),
         "spider_x": payload.get("spider_x", ""),
         "max_devices": max_devices,
-        "allowed_ips": payload.get("allowed_ips") or [],
+        "allowed_ips": raw_allowed,
         "quota_bytes": quota_bytes,
         "expire_at": expire_at,
         "max_requests": max_requests,
@@ -1061,11 +1111,11 @@ async def api_update_user(uid: str, request: Request, _: str = Depends(_require_
                     raise ValueError
                 fields[k] = v
             except (ValueError, TypeError):
-                raise HTTPException(400, f"invalid-{k}")
+                raise HTTPException(400, f"invalid-{k}") from None
     if "allowed_ips" in fields:
         # Ensure list of strings, drop empty, max 20 entries
         if not isinstance(fields["allowed_ips"], list):
-            raise HTTPException(400, "invalid-allowed_ips")
+            raise HTTPException(400, "invalid-allowed_ips") from None
         cleaned = []
         for ip in fields["allowed_ips"][:20]:
             ip = str(ip).strip()
@@ -1074,7 +1124,7 @@ async def api_update_user(uid: str, request: Request, _: str = Depends(_require_
                 try:
                     ipaddress.ip_network(ip, strict=False)
                 except ValueError:
-                    raise HTTPException(400, "invalid-allowed_ips")
+                    raise HTTPException(400, "invalid-allowed_ips") from None
                 cleaned.append(ip)
         fields["allowed_ips"] = cleaned
     proto = fields.get("protocol", user.get("protocol", "vless"))
@@ -1095,17 +1145,24 @@ async def api_update_user(uid: str, request: Request, _: str = Depends(_require_
     if "quota_gb" in payload:
         try:
             q = payload.get("quota_gb") or 0
-            qb = int(float(q) * 1024 ** 3) if str(q).strip() not in ("", "0", "0.0") else 0
-            if qb < 0:
+            qstr = str(q).strip()
+            if qstr in ("", "0", "0.0"):
+                qb = 0
+            else:
+                fv = float(q)
+                if not math.isfinite(fv):
+                    raise ValueError
+                qb = int(fv * 1024 ** 3)
+            if qb < 0 or qb > (1 << 63) - 1:
                 raise ValueError
             fields["quota_bytes"] = qb
-        except (ValueError, TypeError):
-            raise HTTPException(400, "invalid-quota")
+        except (ValueError, TypeError, OverflowError):
+            raise HTTPException(400, "invalid-quota") from None
     if "expire_days" in payload:
         try:
             fields["expire_at"] = _expire_from_days(payload.get("expire_days"))
         except (ValueError, TypeError):
-            raise HTTPException(400, "invalid-expire")
+            raise HTTPException(400, "invalid-expire") from None
     updated = db.update_user(uid, fields)
     if updated and updated.get("protocol") == "wireguard":
         updated = wg.ensure_user_keys(updated)
