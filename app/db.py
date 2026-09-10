@@ -171,14 +171,36 @@ def _ensure_bootstrap():
         c.commit()
 
     # --- default admin — no registration required. ---------------------------
-    # Username: "TiTaN". Password intentionally unset until the admin sets one
-    # from Settings → Security. While auth_is_default is "1", login accepts the
-    # default username without any password.
+    # Password-only login: default password is "TiTaN" (env TITAN_ADMIN_PASS).
+    # User must change it from Settings → Security after first login.
     if not get_admin():
         from . import security as _sec
-        hp = _sec.hash_password("")
-        set_admin("TiTaN", hp["hash"], hp["salt"])
+        default_user = os.environ.get("TITAN_ADMIN_USER", "TiTaN")
+        default_pass = os.environ.get("TITAN_ADMIN_PASS", "TiTaN")
+        hp = _sec.hash_password(default_pass)
+        set_admin(default_user, hp["hash"], hp["salt"])
         set_meta("auth_is_default", "1")
+    else:
+        # Migration: old DBs with empty or TiTaN123 default → upgrade to TiTaN
+        try:
+            from . import security as _sec2  # type: ignore
+            a = get_admin()
+            if a and get_meta("auth_is_default") == "1":
+                is_old = False
+                for old_pass in ("", "TiTaN123", "admin123"):
+                    try:
+                        if _sec2.verify_password(old_pass, a["salt"], a["password_hash"]):
+                            is_old = True
+                            break
+                    except Exception:
+                        pass
+                if is_old:
+                    default_user = os.environ.get("TITAN_ADMIN_USER", "TiTaN")
+                    default_pass = os.environ.get("TITAN_ADMIN_PASS", "TiTaN")
+                    hp = _sec2.hash_password(default_pass)
+                    set_admin(default_user, hp["hash"], hp["salt"])
+        except Exception:
+            pass
 
 
 def get_meta(key: str) -> str | None:

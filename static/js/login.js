@@ -1,6 +1,5 @@
 /* ============================================================
-   TiTaN Login — connected to the real panel API
-   (design preserved: username-first, password only when needed)
+   TiTaN Login — password-only (default: TiTaN)
 ============================================================ */
 
 (function () {
@@ -8,14 +7,8 @@
     const form =
         document.getElementById("loginForm");
 
-    const username =
-        document.getElementById("username");
-
     const password =
         document.getElementById("password");
-
-    const passwordRow =
-        document.getElementById("passwordRow");
 
     const message =
         document.getElementById("message");
@@ -25,65 +18,30 @@
 
 
     /* ============================================================
-       PASSWORD FIELD
-       In the default (first-run) state there is no password, so the
-       password box stays hidden. If the admin has set a password
-       (default_auth === false), we reveal it so login keeps working.
-    ============================================================ */
-
-    function syncPasswordVisibility() {
-        fetch("/api/me", { credentials: "same-origin" })
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
-                if (passwordRow) {
-                    passwordRow.classList.toggle(
-                        "visible",
-                        data.default_auth === false
-                    );
-                }
-            })
-            .catch(function () { /* keep hidden by default */ });
-    }
-
-    syncPasswordVisibility();
-
-
-    /* ============================================================
-       LOGIN
+       LOGIN — password-only, username is fixed to TiTaN (hidden)
     ============================================================ */
 
     form.addEventListener("submit", async function (event) {
 
         event.preventDefault();
 
-        const value =
-            username.value.trim();
-
         const pass =
             (password && password.value) || "";
 
 
-        /*
-         * خالی بودن نام کاربری
-         */
-
-        if (!value) {
+        if (!pass) {
 
             showMessage(
-                "لطفاً نام کاربری را وارد کنید.",
+                "لطفاً رمز عبور را وارد کنید.",
                 "error"
             );
 
-            username.focus();
+            if (password) password.focus();
 
             return;
 
         }
 
-
-        /*
-         * وضعیت Loading
-         */
 
         loginButton.disabled = true;
 
@@ -105,7 +63,7 @@
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    username: value,
+                    username: "TiTaN",
                     password: pass,
                     remember: true
                 })
@@ -138,7 +96,7 @@
                 );
             } else if (response.status === 401) {
                 showMessage(
-                    "نام کاربری یا رمز عبور اشتباه است.",
+                    "رمز عبور اشتباه است.",
                     "error"
                 );
             } else {
@@ -190,16 +148,8 @@
 
 
     /* ============================================================
-       INPUT
+       INPUT — clear message on typing
     ============================================================ */
-
-    username.addEventListener(
-        "input",
-        function () {
-            message.textContent = "";
-            message.className = "message";
-        }
-    );
 
     if (password) {
         password.addEventListener(
@@ -209,24 +159,6 @@
                 message.className = "message";
             }
         );
-    }
-
-
-    /* ============================================================
-       ENTER KEY
-    ============================================================ */
-
-    username.addEventListener(
-        "keydown",
-        function (event) {
-            if (event.key === "Enter") {
-                event.preventDefault();
-                form.requestSubmit();
-            }
-        }
-    );
-
-    if (password) {
         password.addEventListener(
             "keydown",
             function (event) {

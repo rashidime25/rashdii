@@ -374,10 +374,12 @@ def _current_username(request: Request) -> Optional[str]:
     token = request.cookies.get(config.SESSION_COOKIE)
     if not token:
         return None
-    data = security.read_token(db.get_secret_key(), token, config.SESSION_MAX_AGE)
-    if not data or data.get("u") != admin["username"]:
-        return None
-    return admin["username"]
+    # Accept both normal (7d) and "remember me" (28d) tokens
+    for max_age in (config.SESSION_MAX_AGE * 4, config.SESSION_MAX_AGE):
+        data = security.read_token(db.get_secret_key(), token, max_age)
+        if data and data.get("u") == admin["username"]:
+            return admin["username"]
+    return None
 
 
 def _require_auth(request: Request) -> str:
@@ -650,20 +652,24 @@ async def api_login(request: Request):
     if locked_until > time.time():
         raise HTTPException(429, f"locked:{int(locked_until - time.time())}")
     admin = db.get_admin()
-    default_auth = db.get_meta("auth_is_default") == "1"
-    if default_auth and admin:
-        # First-run state: default username "TiTaN", no password required.
-        ok = username == admin["username"]
-    else:
-        ok = bool(admin) and admin["username"] == username and security.verify_password(
+    # Password-only login: username is optional. If not provided, use admin's username.
+    # The password is always verified, even in default mode (default pass = TiTaN).
+    ok = False
+    effective_user = ""
+    if admin:
+        if not username:
+            username = admin["username"]
+        if username == admin["username"] and security.verify_password(
             password, admin["salt"], admin["password_hash"]
-        )
+        ):
+            ok = True
+            effective_user = admin["username"]
 
     if ok:
         db.set_meta(key, json.dumps({"count": 0, "locked_until": 0}))
         db.add_event("info", "login", "admin login", ip=ip)
         resp = JSONResponse({"ok": True})
-        _set_session(resp, username, remember=bool(payload.get("remember")))
+        _set_session(resp, effective_user or username, remember=bool(payload.get("remember")))
         return resp
 
     count += 1
@@ -726,10 +732,14 @@ async def api_change_password(request: Request, _: str = Depends(_require_auth))
         raise HTTPException(400, "weak-password")
     hp = security.hash_password(new)
     db.set_admin(admin["username"], hp["hash"], hp["salt"])
-    # A real password is now set -> disable the "no password" first-run mode.
+    # A real password is now set -> disable the first-run mode.
     db.set_meta("auth_is_default", "0")
+    # Rotate secret to invalidate all old sessions (old password stops working everywhere)
+    db.set_meta("secret_key", secrets.token_hex(32))
     db.add_event("warn", "password-change", "admin password changed", ip=_client_ip(request))
-    return {"ok": True}
+    resp = JSONResponse({"ok": True})
+    _set_session(resp, admin["username"], remember=True)
+    return resp
 
 
 # ------------------------------------------------------------------ settings
@@ -1350,19 +1360,33 @@ async def api_create_node(request: Request, _: str = Depends(_require_auth)):
         raise HTTPException(400, "name-required")
     address = _normalize_node_address(payload.get("address") or "")
     cc = (payload.get("country_code") or "").strip()[:2].upper()
-    # NOTE: auto-detection is intentionally disabled here because it often resolves
-    # Railway domains to US (via ip-api.com). Admins should set country_code/flag manually
-    # or use the node edit form to override. This avoids the node being auto-set to USA.
-    # Manual nodes also get a per-node token so sync works without a shared
+    city = (payload.get("city") or "").strip()[:64]
+    country = (payload.get("country") or "").strip()[:64]
+    flag = (payload.get("flag") or "").strip()[:8]
+    # Auto-detect location from the normalized address when admin hasn't set it manually.
+    # Never overwrite an explicit city/country/country_code/flag provided in the payload.
+    if address and not cc and not flag:
+        try:
+            loc = await asyncio.to_thread(detect_location, address)
+        except Exception:
+            loc = None
+        if loc:
+            city = city or loc.get("city", "")[:64]
+            country = country or loc.get("country", "")[:64]
+            cc = cc or (loc.get("country_code") or "")[:2].upper()
+            flag = flag or loc.get("flag") or _flag_for(cc)
+    if not flag:
+        flag = _flag_for(cc)
+    # Manual nodes get a per-node token so sync works without a shared
     # TITAN_NODE_SECRET; the token is returned once (never re-serialized).
     token = secrets.token_hex(16)
     node = db.create_node({
         "name": name,
         "address": address,
-        "city": (payload.get("city") or "").strip()[:64],
-        "country": (payload.get("country") or "").strip()[:64],
+        "city": city,
+        "country": country,
         "country_code": cc,
-        "flag": payload.get("flag") or _flag_for(cc),
+        "flag": flag,
         "token": token,
     })
     db.add_event("info", "node-create", name, ip=_client_ip(request))
@@ -1382,17 +1406,22 @@ async def api_update_node(node_id: int, request: Request, _: str = Depends(_requ
     if "address" in fields:
         fields["address"] = _normalize_node_address(fields.get("address") or "")
     # auto-detect country/flag if an address is given and none is known
-    if "address" in fields and fields.get("address") and not fields.get("country_code") \
-            and not fields.get("flag") and not node.get("country_code"):
-        # Only auto-detect if the user hasn't explicitly set a country code yet.
-        # This prevents overwriting a manual selection on re-edits.
-        loc = await asyncio.to_thread(detect_location, fields["address"])
+    # Never overwrite explicit manual values — only fill missing fields.
+    effective_addr = fields.get("address") if "address" in fields else node.get("address")
+    if effective_addr and not fields.get("country_code") and not fields.get("flag") and not node.get("country_code"):
+        # Only auto-detect if neither the payload nor the stored node has a country code.
+        # This prevents overwriting a manual selection on re-edits, but fills on first set.
+        addr_for_geo = fields.get("address") or effective_addr
+        try:
+            loc = await asyncio.to_thread(detect_location, addr_for_geo)
+        except Exception:
+            loc = None
         if loc:
-            fields.setdefault("city", loc["city"])
-            fields.setdefault("country", loc["country"])
-            fields["country_code"] = loc["country_code"]
-            fields["flag"] = loc["flag"]
-    if "country_code" in fields and not payload.get("flag"):
+            fields.setdefault("city", loc.get("city", "")[:64])
+            fields.setdefault("country", loc.get("country", "")[:64])
+            fields.setdefault("country_code", (loc.get("country_code") or "")[:2].upper())
+            fields.setdefault("flag", loc.get("flag") or _flag_for(fields.get("country_code") or ""))
+    if "country_code" in fields and not fields.get("flag") and not payload.get("flag"):
         fields["flag"] = _flag_for(fields["country_code"])
     updated = db.update_node(node_id, fields)
     db.add_event("info", "node-update", str(node_id), ip=_client_ip(request))
@@ -1414,7 +1443,52 @@ async def api_ping_node(node_id: int, _: str = Depends(_require_auth)):
         raise HTTPException(404, "not-found")
     _node_status_cache.pop(node_id, None)
     db.touch_node(node_id)
-    return {"ok": True, "status": await _node_status(node)}
+    status = await _node_status(node)
+    # "بررسی نود" — auto-fill city/country/country_code/flag from the node's domain
+    # if the stored node is missing them. Normalize to https://host[:port] first,
+    # never overwrite a manually set value.
+    addr = (node.get("address") or "").strip()
+    need_geo = addr and (not node.get("country_code") or not node.get("city") or not node.get("flag") or node.get("flag") == "🏳️")
+    if need_geo:
+        norm = _normalize_node_address(addr)
+        if norm and norm != addr:
+            # Persist normalized address as well (https://host[:port])
+            try:
+                db.update_node(node_id, {"address": norm})
+                node["address"] = norm
+                addr = norm
+            except Exception:
+                pass
+        try:
+            loc = await asyncio.to_thread(detect_location, addr)
+        except Exception:
+            loc = None
+        if loc:
+            patch = {}
+            if not node.get("city") and loc.get("city"):
+                patch["city"] = loc["city"][:64]
+            if not node.get("country") and loc.get("country"):
+                patch["country"] = loc["country"][:64]
+            if not node.get("country_code") and loc.get("country_code"):
+                patch["country_code"] = (loc["country_code"] or "")[:2].upper()
+                patch["flag"] = loc.get("flag") or _flag_for(patch["country_code"])
+            elif not node.get("flag") or node.get("flag") == "🏳️":
+                # Fill flag if missing but country_code already known
+                cc = node.get("country_code") or patch.get("country_code") or ""
+                if cc:
+                    patch["flag"] = _flag_for(cc)
+                elif loc.get("flag"):
+                    patch["flag"] = loc["flag"]
+                    if not patch.get("country_code") and loc.get("country_code"):
+                        patch["country_code"] = (loc["country_code"] or "")[:2].upper()
+            if patch:
+                try:
+                    updated = db.update_node(node_id, patch)
+                    if updated:
+                        node = updated
+                except Exception:
+                    pass
+    return {"ok": True, "status": status, "node": _serialize_node(node, status)}
 
 
 @app.post("/api/nodes/{node_id}/sync")

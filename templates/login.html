@@ -176,7 +176,7 @@
 
                 <p>
 
-                    برای ورود به پنل، نام کاربری خود را وارد کنید
+                    رمز عبور را وارد کنید — رمز پیش‌فرض <b>TiTaN</b> است
 
                 </p>
 
@@ -195,52 +195,9 @@
                 autocomplete="off"
             >
 
+                <input type="hidden" id="username" name="username" value="TiTaN">
 
-                <div class="input-box">
-
-
-                    <div class="user-icon">
-
-
-                        <svg
-                            viewBox="0 0 24 24"
-                            xmlns="http://www.w3.org/2000/svg"
-                        >
-
-                            <circle
-                                cx="12"
-                                cy="7"
-                                r="4"
-                            />
-
-                            <path
-                                d="M4 21C4.8 17.1 7.4 15 12 15C16.6 15 19.2 17.1 20 21"
-                            />
-
-                        </svg>
-
-
-                    </div>
-
-
-                    <div class="input-line"></div>
-
-
-                    <input
-                        id="username"
-                        name="username"
-                        type="text"
-                        placeholder="نام کاربری"
-                        autocomplete="username"
-                        spellcheck="false"
-                    >
-
-
-                </div>
-
-
-
-                <div class="input-box password-row" id="passwordRow">
+                <div class="input-box password-row visible" id="passwordRow">
                     <div class="user-icon">
                         <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                             <rect x="5" y="11" width="14" height="9" rx="2" />
@@ -248,7 +205,7 @@
                         </svg>
                     </div>
                     <div class="input-line"></div>
-                    <input id="password" name="password" type="password" placeholder="رمز عبور" autocomplete="current-password" spellcheck="false">
+                    <input id="password" name="password" type="password" placeholder="رمز عبور" autocomplete="current-password" spellcheck="false" autofocus>
                 </div>
 
                 <button
