@@ -13,6 +13,7 @@ import math
 import os
 import re
 import secrets
+import threading
 import time
 import uuid as uuid_lib
 from contextlib import asynccontextmanager
@@ -52,6 +53,12 @@ DOH_PRIMARY = "https://1.1.1.1/dns-query"
 DOH_SECONDARY = "https://8.8.8.8/dns-query"
 doh_client = httpx.AsyncClient(timeout=6.0, follow_redirects=True)
 
+
+# Idempotency for config creation (double-click / network retry after “failed to fetch”).
+# Frontend now sends a per-wizard client_nonce; fallback is (name, node_id, protocol).
+_recent_creates: dict[str, tuple[float, str]] = {}
+_recent_creates_lock = threading.Lock()
+_IDEMPOTENCY_TTL = 10.0  # seconds
 
 log = logging.getLogger("titan.main")
 
@@ -982,6 +989,33 @@ async def api_list_users(_: str = Depends(_require_auth)):
 @app.post("/api/users")
 async def api_create_user(request: Request, _: str = Depends(_require_auth)):
     payload = await request.json()
+    # --- idempotency guard: second quick retry with same nonce/payload returns first user ---
+    raw_nonce = (payload.get("client_nonce") or payload.get("_nonce") or "").strip()[:64]
+    now = time.time()
+    # prune expired entries
+    with _recent_creates_lock:
+        for k in list(_recent_creates.keys()):
+            ts, _ = _recent_creates[k]
+            if now - ts > _IDEMPOTENCY_TTL:
+                _recent_creates.pop(k, None)
+        dedup_key = None
+        if raw_nonce:
+            dedup_key = f"nonce:{raw_nonce}"
+        else:
+            # fallback key from stable fields (prevents double-click w/o nonce)
+            try:
+                nm = (payload.get("name") or "User").strip()[:64]
+                nid = db.coerce_node_id(payload.get("node_id"))
+                proto = (payload.get("protocol") or "vless").strip().lower()
+                dedup_key = f"fallback:{nm}\x1f{nid}\x1f{proto}\x1f{request.client.host if request.client else ''}"
+            except Exception:
+                dedup_key = None
+        if dedup_key and dedup_key in _recent_creates:
+            ts, prev_uid = _recent_creates[dedup_key]
+            if now - ts < _IDEMPOTENCY_TTL:
+                prev = db.get_user(prev_uid)
+                if prev:
+                    return {"ok": True, "user": _serialize_user(prev, with_links=True, request=request), "deduped": True}
     settings = db.get_settings()
     uid = secrets.token_hex(8)
     protocol = payload.get("protocol", "vless")
@@ -1070,6 +1104,10 @@ async def api_create_user(request: Request, _: str = Depends(_require_auth)):
     user = db.create_user(data)
     if protocol == "wireguard":
         user = wg.ensure_user_keys(user)
+    # remember for dedup window so an immediate retry returns this user
+    if dedup_key:
+        with _recent_creates_lock:
+            _recent_creates[dedup_key] = (time.time(), uid)
     _reload_xray()
     _trigger_node_sync()
     db.add_event("info", "user-create", f"{user['name']} ({protocol})", ip=_client_ip(request))

@@ -293,6 +293,7 @@
 
   function collectUserForm(formEl) {
     const fd = new FormData(formEl);
+    const nonce = (formEl && formEl.dataset && formEl.dataset.nonce) ? formEl.dataset.nonce : '';
     return {
       name: fd.get('name'), protocol: fd.get('protocol'), transport: fd.get('transport'),
       security: fd.get('security'), fingerprint: fd.get('fingerprint'), alpn: fd.get('alpn'),
@@ -305,6 +306,7 @@
       allowed_ips: (fd.get('allowed_ips') || '').split(',').map(s => s.trim()).filter(Boolean),
       note: fd.get('note'),
       avatar: fd.get('avatar') || '',
+      client_nonce: nonce || (Math.random().toString(36).slice(2) + Date.now().toString(36)),
     };
   }
 
@@ -650,22 +652,35 @@
     const m = U.modal({
       title: I18N.t(u ? 'edit' : 'add_user'),
       lg: true,
-      body: `<form id="userForm">${userFields(u, settings, nodes)}</form>`,
-      foot: `<button class="btn" data-close>${I18N.t('cancel')}</button>
-             <button class="btn primary" id="saveUserBtn">${I18N.t('save')}</button>`,
+      body: `<form id="userForm" onsubmit="return false">${userFields(u, settings, nodes)}</form>`,
+      foot: `<button type="button" class="btn" data-close>${I18N.t('cancel')}</button>
+             <button type="button" class="btn primary" id="saveUserBtn">${I18N.t('save')}</button>`,
     });
-    wireAvatarPicker(m.query('#userForm'));
-    wireProtoDeps(m.query('#userForm'));
+    const formEl = m.query('#userForm');
+    if (formEl && !formEl.dataset.nonce) formEl.dataset.nonce = Math.random().toString(36).slice(2,10) + Date.now().toString(36);
+    wireAvatarPicker(formEl);
+    wireProtoDeps(formEl);
     I18N.apply();
-    m.query('#saveUserBtn').addEventListener('click', async () => {
-      const body = collectUserForm(m.query('#userForm'));
+    const saveBtn = m.query('#saveUserBtn');
+    let submitting = false;
+    // prevent native form submit (Enter key) from causing a navigation/duplicate
+    formEl.addEventListener('submit', (e) => e.preventDefault());
+    saveBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      if (submitting) return;
+      submitting = true;
+      saveBtn.disabled = true;
+      const prevHtml = saveBtn.innerHTML;
+      saveBtn.innerHTML = I18N.t('saving') || '…';
       try {
+        const body = collectUserForm(m.query('#userForm'));
         if (u) { await U.apiJson(`/api/users/${u.uid}`, { method: 'PATCH', body: JSON.stringify(body) }); }
         else { await U.apiJson('/api/users', { method: 'POST', body: JSON.stringify(body) }); }
         U.closeModal();
         U.toast(I18N.t(u ? 'user_updated' : 'user_created'), 'ok');
         if (U.current === 'users') U.render();
       } catch (err) { U.toast(err.message, 'err'); }
+      finally { submitting = false; saveBtn.disabled = false; saveBtn.innerHTML = prevHtml; }
     });
   }
 
@@ -783,7 +798,7 @@
       title: I18N.t(u ? 'edit' : 'new_config'),
       lg: true,
       body: `
-        <form id="cfgForm">
+        <form id="cfgForm" onsubmit="return false">
           <div class="wiz-section"><h4><span class="step">1</span>${I18N.t('wizard_main')}</h4>
             <div class="field">
               <span class="field-label" data-i18n="avatar_user"></span>
@@ -833,23 +848,35 @@
             <div class="cell-sub" style="margin-top:8px" data-i18n="preview_hint"></div>
           </div>
         </form>`,
-      foot: `<button class="btn" data-close>${I18N.t('cancel')}</button>
-             <button class="btn primary" id="saveCfgBtn">${I18N.t('save')}</button>`,
+      foot: `<button type="button" class="btn" data-close>${I18N.t('cancel')}</button>
+             <button type="button" class="btn primary" id="saveCfgBtn">${I18N.t('save')}</button>`,
     });
     I18N.apply();
-    wireAvatarPicker(m.query('#cfgForm'));
-    wireProtoDeps(m.query('#cfgForm'));
+    const cfgFormEl = m.query('#cfgForm');
+    if (cfgFormEl && !cfgFormEl.dataset.nonce) cfgFormEl.dataset.nonce = Math.random().toString(36).slice(2,10) + Date.now().toString(36);
+    wireAvatarPicker(cfgFormEl);
+    wireProtoDeps(cfgFormEl);
     preview();
-    m.query('#cfgForm').addEventListener('input', U.debounce(preview, 150));
-    m.query('#saveCfgBtn').addEventListener('click', async () => {
-      const body = collectUserForm(m.query('#cfgForm'));
+    cfgFormEl.addEventListener('input', U.debounce(preview, 150));
+    // prevent Enter from submitting the form natively (would cause navigation + failed to fetch)
+    cfgFormEl.addEventListener('submit', (e) => e.preventDefault());
+    const saveBtn = m.query('#saveCfgBtn');
+    let submitting = false;
+    saveBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      if (submitting) return;
+      submitting = true;
+      saveBtn.disabled = true;
+      const prevHtml = saveBtn.innerHTML;
+      saveBtn.innerHTML = I18N.t('saving') || '…';
       try {
+        const body = collectUserForm(m.query('#cfgForm'));
         if (u) { await U.apiJson(`/api/users/${u.uid}`, { method: 'PATCH', body: JSON.stringify(body) }); }
         else {
           const res = await U.apiJson('/api/users', { method: 'POST', body: JSON.stringify(body) });
           U.closeModal();
           U.toast(I18N.t('config_created'), 'ok');
-          await openLinksModal(res.user.uid);
+          try { await openLinksModal(res.user.uid); } catch (_) { /* links modal failure should not hide the created config */ }
           if (U.current === 'configs') U.render();
           return;
         }
@@ -857,6 +884,7 @@
         U.toast('ok', 'ok');
         if (U.current === 'configs') U.render();
       } catch (err) { U.toast(err.message, 'err'); }
+      finally { submitting = false; saveBtn.disabled = false; saveBtn.innerHTML = prevHtml; }
     });
   }
 
