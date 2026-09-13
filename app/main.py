@@ -1911,14 +1911,28 @@ async def api_public_status(uid: str):
 
 
 # ------------------------------------------------------------------ system
+@app.get("/healthz")
+async def healthz():
+    """Ultra-fast liveness probe for Railway healthcheck - no DB, no WG."""
+    return {"status": "ok", "ts": time.time(), "version": APP_VERSION}
+
 @app.get("/health")
 async def health():
+    # keep DB-backed for node sync verification, but never block healthz
+    try:
+        users = len(db.list_users())
+    except Exception:
+        users = -1
+    try:
+        wg_pub = wg.server_public_key()
+    except Exception:
+        wg_pub = ""
     return {
         "status": "ok",
         "ts": time.time(),
         "version": APP_VERSION,
-        "wg_pub": wg.server_public_key(),  # "" when WireGuard is unavailable
-        "users": len(db.list_users()),     # lets the main panel verify sync
+        "wg_pub": wg_pub,
+        "users": users,
     }
 
 

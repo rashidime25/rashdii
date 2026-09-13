@@ -37,5 +37,15 @@ fi
 
 echo "[entrypoint] routing: PORT=${PORT} PANEL_PORT=${PANEL_PORT}"
 echo "[entrypoint] storage: TITAN_DATA_DIR=${TITAN_DATA_DIR:-/app/data} (a Volume must be mounted here)"
+# Railway healthcheck probe - log whether /healthz is reachable via nginx and directly
+(
+  sleep 6
+  echo "[entrypoint] health probe: nginx http://127.0.0.1:${PORT}/healthz"
+  curl -s -m 3 -i http://127.0.0.1:${PORT}/healthz | head -n 5 || echo "[entrypoint] nginx healthz FAILED"
+  echo "[entrypoint] health probe: panel http://127.0.0.1:${PANEL_PORT}/healthz"
+  curl -s -m 3 -i http://127.0.0.1:${PANEL_PORT}/healthz | head -n 5 || echo "[entrypoint] panel healthz FAILED"
+  echo "[entrypoint] env: PORT=${PORT} PANEL_PORT=${PANEL_PORT} RAILWAY_PUBLIC_DOMAIN=${RAILWAY_PUBLIC_DOMAIN:-}"
+  ls -ld "${TITAN_DATA_DIR:-/app/data}" 2>&1 | head -n 2 || true
+) &
 
 exec python3 -m app.main
