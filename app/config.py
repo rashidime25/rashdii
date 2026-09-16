@@ -136,6 +136,14 @@ XRAY_BIN = os.environ.get("XRAY_BIN", "/usr/local/bin/xray")
 
 # Where Xray's own stdout/stderr goes (diagnostics).
 XRAY_LOG_PATH = os.environ.get("TITAN_XRAY_LOG", os.path.join(DATA_DIR, "xray.log"))
+# Watchdog: how often to check that the engine is still alive (seconds).
+XRAY_WATCHDOG_INTERVAL = int(os.environ.get("TITAN_XRAY_WATCHDOG_INTERVAL", "30"))
+# A user counts as "online" when traffic was seen within this window (seconds).
+ONLINE_WINDOW = int(os.environ.get("TITAN_ONLINE_WINDOW", "60"))
+# The Xray version the image is pinned to; shown in the panel for verification.
+XRAY_PINNED_VERSION = os.environ.get("TITAN_XRAY_VERSION", "26.9.9")
+# Set to 1 to hide user count / WG key from the unauthenticated /health payload.
+HEALTH_MINIMAL = os.environ.get("TITAN_HEALTH_MINIMAL", "") == "1"
 
 # Session cookie.
 SESSION_COOKIE = "titan_session"
