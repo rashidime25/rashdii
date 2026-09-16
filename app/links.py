@@ -97,7 +97,14 @@ def build_vless_link(host: str, port: int, user: dict, settings: dict) -> str:
         pk = quote(user.get("public_key") or settings.get("reality_pub", ""), safe="")
         sid = quote(user.get("short_id") or settings.get("reality_sid", ""), safe="")
         rsni = settings.get("reality_sni") or sni
-        sx = quote(user.get("spider_x", "") or rsni, safe="")
+        # spiderX is the *path* the client starts crawling at. It must be a
+        # path or empty — never the SNI: Xray rejects the whole client config
+        # with `invalid "spiderX": <value>` (tested), so every Reality link the
+        # panel handed out was unusable in a real client.
+        spider = str(user.get("spider_x") or "").strip() or "/"
+        if not spider.startswith("/"):
+            spider = "/" + spider
+        sx = quote(spider, safe="/")
         return (
             f"vless://{uuid}@{host}:{port}?encryption=none&security=reality&"
             f"pbk={pk}&sid={sid}&sni={quote(rsni, safe='')}&spx={sx}&fp={fp}&type=tcp&"
