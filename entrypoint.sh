@@ -20,20 +20,52 @@ export PANEL_PORT
 
 # Public listen port, and the panel upstream. The upstream is matched by its
 # marker comment so the WS/xhttp/grpc proxies keep their own ports.
-sed -i -E "s/listen [0-9]+;|listen NGINX_PORT;/listen ${PORT};/g" "$NGINX_CONF"
-sed -i -E "s@(proxy_pass http://127\.0\.0\.1:)[0-9]+;([[:space:]]*#[[:space:]]*titan-panel-upstream)@\1${PANEL_PORT};\2@g" "$NGINX_CONF"
-
-if command -v nginx >/dev/null 2>&1; then
-  nginx -t
-  nginx -s stop 2>/dev/null || true
-  nginx
-  echo "[entrypoint] nginx: ${PORT} -> panel 127.0.0.1:${PANEL_PORT}"
+if [ -r "$NGINX_CONF" ] && [ -w "$NGINX_CONF" ]; then
+  sed -i -E "s/listen [0-9]+;|listen NGINX_PORT;/listen ${PORT};/g" "$NGINX_CONF" || \
+    echo "[entrypoint] could not rewrite listen port in $NGINX_CONF"
+  sed -i -E "s@(proxy_pass http://127\.0\.0\.1:)[0-9]+;([[:space:]]*#[[:space:]]*titan-panel-upstream)@\1${PANEL_PORT};\2@g" "$NGINX_CONF" || \
+    echo "[entrypoint] could not rewrite panel upstream in $NGINX_CONF"
 else
-  # No nginx in this image (a different builder, a stripped start command): nothing
-  # would answer $PORT, so the panel serves it directly instead of a hidden 10000.
-  export PANEL_PORT="$PORT"
-  echo "[entrypoint] no nginx found - the panel itself will serve PORT=${PORT}"
+  echo "[entrypoint] $NGINX_CONF missing or read-only - skipping rewrite"
 fi
+
+# Every step here is allowed to fail without killing the container: a panel that
+# answers on its own port is worth far more than a perfectly configured nginx that
+# never starts. "Application failed to respond" on a platform edge is almost always
+# this exact class of failure, and it used to be a silent, fatal one.
+nginx_ok=0
+if command -v nginx >/dev/null 2>&1; then
+  if [ -r "$NGINX_CONF" ] && nginx -t >/tmp/nginx-t.log 2>&1; then
+    nginx -s stop 2>/dev/null || true
+    if nginx; then
+      nginx_ok=1
+      echo "[entrypoint] nginx: ${PORT} -> panel 127.0.0.1:${PANEL_PORT}"
+    else
+      echo "[entrypoint] nginx failed to start - serving without it"
+    fi
+  else
+    echo "[entrypoint] nginx config not usable - serving without it"
+    [ -r "$NGINX_CONF" ] || echo "[entrypoint]   missing $NGINX_CONF"
+    sed -n '1,5p' /tmp/nginx-t.log 2>/dev/null | sed 's/^/[entrypoint]   /'
+  fi
+else
+  echo "[entrypoint] no nginx found"
+fi
+
+if [ "$nginx_ok" != "1" ]; then
+  # Nothing else is listening on $PORT, so the panel takes it directly instead of
+  # hiding behind a proxy that is not there. (The app also falls back to PORT by
+  # itself; setting it here keeps both halves of the container in agreement.)
+  export PANEL_PORT="$PORT"
+  echo "[entrypoint] panel itself will serve PORT=${PORT}"
+fi
+# Prove the port is really being served, from inside the container, and say so in
+# the deploy log - instead of leaving the platform edge to report a timeout.
+(
+  sleep 8
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 4 "http://127.0.0.1:${PANEL_PORT}/healthz" || true)
+  echo "[entrypoint] self-check: /healthz on 127.0.0.1:${PANEL_PORT} -> ${code:-no answer}"
+) &
 
 echo "[entrypoint] routing: PORT=${PORT} PANEL_PORT=${PANEL_PORT}"
 echo "[entrypoint] storage: TITAN_DATA_DIR=${TITAN_DATA_DIR:-/app/data} (a Volume must be mounted here)"

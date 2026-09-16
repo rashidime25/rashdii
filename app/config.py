@@ -43,7 +43,23 @@ XRAY_CONFIG_PATH = os.environ.get(
 PUBLIC_PORT = int(os.environ.get("PORT", "8000"))
 
 # Ports for the internal services (localhost only).
-PANEL_PORT = int(os.environ.get("PANEL_PORT", "10000"))
+# Where uvicorn binds inside the container. Precedence matters:
+#   1. an explicit PANEL_PORT (what entrypoint.sh exports after putting nginx on
+#      the platform port),
+#   2. otherwise the platform's own PORT - because a start command that runs the
+#      app directly (no nginx, a platform override, a stripped Procfile) would
+#      otherwise bind 10000 while the edge waits on PORT, and the only symptom is
+#      the least debuggable error there is: "Application failed to respond".
+#   3. the historical default.
+def _panel_port() -> int:
+    for key in ("PANEL_PORT", "PORT"):
+        raw = (os.environ.get(key) or "").strip()
+        if raw.isdigit() and 1 <= int(raw) <= 65535:
+            return int(raw)
+    return 10000
+
+
+PANEL_PORT = _panel_port()
 XRAY_VLESS_WS_PORT = int(os.environ.get("XRAY_VLESS_WS_PORT", "10001"))
 XRAY_VMESS_WS_PORT = int(os.environ.get("XRAY_VMESS_WS_PORT", "10002"))
 XRAY_TROJAN_WS_PORT = int(os.environ.get("XRAY_TROJAN_WS_PORT", "10003"))
