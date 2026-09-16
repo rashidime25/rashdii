@@ -279,6 +279,20 @@
           <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">حد درخواست<input id="mu_requests" type="number" value="${u.max_requests||0}" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"></label>
         </div>
         <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">IPهای مجاز (با کاما جدا کن، CIDR هم قبول است)<input id="mu_ips" value="${esc((u.allowed_ips||[]).join(','))}" dir="ltr" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"></label>
+        <div style="border-top:1px solid rgba(151,116,255,.16);padding-top:14px;display:grid;gap:12px">
+          <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">پروفایل آماده (Recipe)<select id="mu_recipe" data-cur="${esc(u.recipe||'')}" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"><option value="">بدون پروفایل</option></select></label>
+          <div id="mu_recipe_hint" style="font-size:10px;color:#7d829d;line-height:1.7">انتخاب پروفایل، فیلدهای خالی زیر را پر می‌کند؛ هر چیزی که خودت تنظیم کرده باشی دست‌نخورده می‌ماند.</div>
+          <details id="mu_adv" style="border:1px solid rgba(151,116,255,.18);border-radius:12px;padding:10px 12px;background:rgba(10,20,39,.35)">
+            <summary style="cursor:pointer;font-size:11px;color:#cbb8ff">تنظیمات پیشرفته کانفیگ</summary>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+              <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">Flow (VLESS)<select id="mu_flow" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"><option value="" ${(u.flow||'')===''?'selected':''}>پیش‌فرض سرور</option><option value="none" ${u.flow==='none'?'selected':''}>بدون Flow (VLESS ساده)</option><option value="xtls-rprx-vision" ${u.flow==='xtls-rprx-vision'?'selected':''}>xtls-rprx-vision</option><option value="xtls-rprx-vision-udp443" ${u.flow==='xtls-rprx-vision-udp443'?'selected':''}>vision + udp443</option></select></label>
+              <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">پلن سرعت (Policy)<select id="mu_plan" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"><option value="0" ${(u.policy_level||0)===0?'selected':''}>متعادل (پیش‌فرض)</option><option value="1" ${u.policy_level===1?'selected':''}>گیمینگ — تأخیر کم</option><option value="2" ${u.policy_level===2?'selected':''}>استریم/دانلود — توان بالا</option></select></label>
+              <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">SNI اختصاصی Reality<input id="mu_rsni" value="${esc(u.reality_sni||'')}" dir="ltr" placeholder="www.samsung.com" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"></label>
+              <label style="display:flex;flex-direction:row;align-items:center;gap:8px;font-size:11px;color:#a8a6bf;margin-top:18px"><input id="mu_mux" type="checkbox" ${u.mux_enabled?'checked':''}><span>Mux چند-کاناله (برای کلاینت JSON)</span></label>
+            </div>
+            <div style="font-size:10px;color:#7d829d;margin-top:10px;line-height:1.7">SNI اختصاصی روی Reality معنی دارد؛ پلن سرعت سرور را برای همین کاربر تنظیم می‌کند.</div>
+          </details>
+        </div>
       </div>
     `, async (overlay)=>{
       const body={
@@ -297,6 +311,11 @@
         max_requests: parseInt($('#mu_requests',overlay).value)||0,
         allowed_ips: ($('#mu_ips',overlay).value||'').split(',').map(s=>s.trim()).filter(Boolean),
         avatar: $('#mu_avatar',overlay).value,
+        recipe: $('#mu_recipe',overlay) ? $('#mu_recipe',overlay).value : '',
+        flow: $('#mu_flow',overlay) ? $('#mu_flow',overlay).value : '',
+        reality_sni: $('#mu_rsni',overlay) ? $('#mu_rsni',overlay).value.trim() : '',
+        policy_level: $('#mu_plan',overlay) ? (parseInt($('#mu_plan',overlay).value)||0) : 0,
+        mux_enabled: $('#mu_mux',overlay) ? $('#mu_mux',overlay).checked : false,
         client_nonce: Math.random().toString(36).slice(2)+Date.now().toString(36)
       };
       if(isEdit){
