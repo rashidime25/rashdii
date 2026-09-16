@@ -150,6 +150,25 @@ def _ensure_bootstrap():
     if "wg_pub" not in cols:
         c.execute("ALTER TABLE users ADD COLUMN wg_pub TEXT NOT NULL DEFAULT ''")
         c.commit()
+    # Per-user engine knobs (config builder): flow, identity + policy level.
+    # `flow` empty means "inherit the panel default for this transport";
+    # `short_id` and `reality_sni` give each user their own Reality identity on a
+    # shared inbound (blocking/serving one user without touching the others).
+    if "flow" not in cols:
+        c.execute("ALTER TABLE users ADD COLUMN flow TEXT NOT NULL DEFAULT ''")
+        c.commit()
+    if "reality_sni" not in cols:
+        c.execute("ALTER TABLE users ADD COLUMN reality_sni TEXT NOT NULL DEFAULT ''")
+        c.commit()
+    if "policy_level" not in cols:
+        c.execute("ALTER TABLE users ADD COLUMN policy_level INTEGER NOT NULL DEFAULT 0")
+        c.commit()
+    if "mux_enabled" not in cols:
+        c.execute("ALTER TABLE users ADD COLUMN mux_enabled INTEGER NOT NULL DEFAULT 0")
+        c.commit()
+    if "recipe" not in cols:
+        c.execute("ALTER TABLE users ADD COLUMN recipe TEXT NOT NULL DEFAULT ''")
+        c.commit()
 
     # migration: nodes.token (per-node credential issued by the main panel)
     ncols = [r["name"] for r in c.execute("PRAGMA table_info(nodes)").fetchall()]
@@ -307,6 +326,7 @@ def create_user(data: dict) -> dict:
             "spider_x", "max_devices", "first_device_uid", "allowed_ips",
             "quota_bytes", "expire_at", "created_at", "max_requests", "node_id",
             "avatar", "ss_method", "wg_ip", "wg_priv", "wg_pub",
+            "flow", "reality_sni", "policy_level", "mux_enabled", "recipe",
         ]
         now = time.time()
         values = {
@@ -336,6 +356,11 @@ def create_user(data: dict) -> dict:
             "wg_ip": data.get("wg_ip", "") or "",
             "wg_priv": data.get("wg_priv", "") or "",
             "wg_pub": data.get("wg_pub", "") or "",
+            "flow": data.get("flow", "") or "",
+            "reality_sni": data.get("reality_sni", "") or "",
+            "policy_level": int(data.get("policy_level", 0) or 0),
+            "mux_enabled": 1 if data.get("mux_enabled") else 0,
+            "recipe": (data.get("recipe") or "")[:32],
         }
         placeholders = ", ".join("?" for _ in cols)
         c.execute(
@@ -356,6 +381,8 @@ def update_user(uid: str, fields: dict) -> dict | None:
         # allowed_ips was missing from this allowlist, so PATCH silently
         # dropped it (the handler validated it, the UPDATE never wrote it).
         "allowed_ips",
+        # config-builder knobs (see the migration above)
+        "flow", "reality_sni", "policy_level", "mux_enabled", "recipe",
     }
     with _lock:
         c = _connect()
