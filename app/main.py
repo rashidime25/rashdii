@@ -66,6 +66,21 @@ _IDEMPOTENCY_TTL = 10.0  # seconds
 
 log = logging.getLogger("titan.main")
 
+# Why this exists: the panel logs through the `titan.*` namespace, and nothing ever
+# configured that namespace, so every line it wrote was dropped unless some library
+# happened to install a root handler. A deploy log could therefore show *nothing at
+# all* while the panel was busy failing to start - the single worst thing to debug.
+# TITAN_LOG_LEVEL=warning (or error/critical/silent) restores the quiet behaviour.
+_log_level = os.environ.get("TITAN_LOG_LEVEL", "info").strip().lower()
+if _log_level not in ("warning", "warn", "error", "critical", "silent"):
+    _titan_log = logging.getLogger("titan")
+    if not _titan_log.handlers:
+        _handler = logging.StreamHandler()
+        _handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        _titan_log.addHandler(_handler)
+    _titan_log.setLevel(logging.DEBUG if _log_level == "debug" else logging.INFO)
+    _titan_log.propagate = False
+
 
 # ------------------------------------------------------------------ lifespan
 @asynccontextmanager

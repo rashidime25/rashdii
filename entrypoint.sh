@@ -54,10 +54,18 @@ fi
 
 if [ "$nginx_ok" != "1" ]; then
   # Nothing else is listening on $PORT, so the panel takes it directly instead of
-  # hiding behind a proxy that is not there.
+  # hiding behind a proxy that is not there. (The app also falls back to PORT by
+  # itself; setting it here keeps both halves of the container in agreement.)
   export PANEL_PORT="$PORT"
   echo "[entrypoint] panel itself will serve PORT=${PORT}"
 fi
+# Prove the port is really being served, from inside the container, and say so in
+# the deploy log - instead of leaving the platform edge to report a timeout.
+(
+  sleep 8
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 4 "http://127.0.0.1:${PANEL_PORT}/healthz" || true)
+  echo "[entrypoint] self-check: /healthz on 127.0.0.1:${PANEL_PORT} -> ${code:-no answer}"
+) &
 
 echo "[entrypoint] routing: PORT=${PORT} PANEL_PORT=${PANEL_PORT}"
 echo "[entrypoint] storage: TITAN_DATA_DIR=${TITAN_DATA_DIR:-/app/data} (a Volume must be mounted here)"
