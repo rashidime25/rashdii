@@ -70,6 +70,15 @@ log = logging.getLogger("titan.main")
 # ------------------------------------------------------------------ lifespan
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Boot phases are timed and logged because a platform healthcheck that never
+    # passes is indistinguishable, from the outside, from a panel that crashed -
+    # "Application failed to respond" covers both, and the only way to tell them
+    # apart from a deploy log is to know which phase was still running.
+    _boot_t0 = time.time()
+
+    def _phase(name: str) -> None:
+        log.info("startup: %s done in %.2fs", name, time.time() - _boot_t0)
+
     # config._usable_data_dir() already made this writable (or replaced it with a
     # temp dir and said so loudly), so a bad Volume cannot crash the boot.
     os.makedirs(config.DATA_DIR, exist_ok=True)
@@ -79,6 +88,7 @@ async def lifespan(app: FastAPI):
             reality.ensure_reality_keys()
         except Exception:  # noqa: BLE001
             pass
+    _phase("reality keys")
     try:
         xray.write_xray_config()
         xray.restart_xray()
@@ -96,6 +106,7 @@ async def lifespan(app: FastAPI):
                 pass
     except Exception:  # noqa: BLE001
         pass
+    _phase("xray config + engine")
     # WireGuard (optional): generate this node's keypair + start the server.
     try:
         wg.ensure_keys()
@@ -103,6 +114,7 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         pass
     bg.start_background_tasks(app)
+    log.info("startup: ready in %.2fs (healthz is served from here on)", time.time() - _boot_t0)
     yield
     for t in app.state.titan_tasks:
         t.cancel()
