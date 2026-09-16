@@ -13,6 +13,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 import uuid as uuid_lib
@@ -78,6 +79,18 @@ async def lifespan(app: FastAPI):
     try:
         xray.write_xray_config()
         xray.restart_xray()
+    except xray.ConfigError as e:
+        # The freshly generated config was rejected by the engine. Fall back to
+        # the last known-good one instead of booting a panel whose proxy is dead.
+        log.error("startup config rejected: %s", e)
+        backup = config.XRAY_CONFIG_PATH + ".bak"
+        if os.path.exists(backup):
+            try:
+                shutil.copyfile(backup, config.XRAY_CONFIG_PATH)
+                xray.restart_xray()
+                db.add_event("warn", "config-rollback", "started from the previous config")
+            except Exception:  # noqa: BLE001
+                pass
     except Exception:  # noqa: BLE001
         pass
     # WireGuard (optional): generate this node's keypair + start the server.
@@ -410,13 +423,22 @@ def _user_status(u: dict) -> dict:
     quota_exceeded = quota > 0 and used >= quota
     expired = bool(u.get("expire_at")) and now >= u["expire_at"]
     enabled = bool(u["enabled"]) and not quota_exceeded and not expired
+    # "online" used to come from state.ACTIVE, which nothing ever populated, so
+    # the panel always showed 0 active connections. The engine is the only source
+    # of truth we have: the stats flush records the moment traffic last moved for
+    # a uid, so a recent timestamp means a live session.
+    last_traffic = state.LAST_TRAFFIC.get(u["uid"]) or 0
+    online = bool(last_traffic) and (now - last_traffic) <= config.ONLINE_WINDOW
+    tracked = state.active_count(u["uid"])
     return {
         "used": used,
         "quota_bytes": quota,
         "quota_exceeded": quota_exceeded,
         "expired": expired,
         "live_enabled": enabled,
-        "active_connections": state.active_count(u["uid"]),
+        "active_connections": tracked or (1 if online else 0),
+        "online": online,
+        "last_traffic": int(last_traffic) or None,
         "days_left": (
             max(0, int((u["expire_at"] - now) // 86400)) if u.get("expire_at") else None
         ),
@@ -803,6 +825,8 @@ async def api_set_settings(request: Request, _: str = Depends(_require_auth)):
         try:
             xray.write_xray_config()
             xray.restart_xray()
+        except xray.ConfigError:
+            pass  # invalid candidate rejected; running config untouched
         except Exception:  # noqa: BLE001
             pass
     db.add_event("info", "settings-update", json.dumps(updates, ensure_ascii=False)[:300])
@@ -932,7 +956,11 @@ async def api_connection_test(_: str = Depends(_require_auth)):
     result = {
         "xray_installed": xray.xray_available(),
         "xray_running": xray.xray_running(),
+        "xray_version": xray.xray_version(),
+        "xray_expected_version": config.XRAY_PINNED_VERSION,
+        "xray_last_exit": xray.last_exit() or None,
         "config_exists": os.path.exists(config.XRAY_CONFIG_PATH),
+        "config_backup": os.path.exists(config.XRAY_CONFIG_PATH + ".bak"),
         "domain": domain,
         "port": port,
         "public_domain_configured": bool(domain),
@@ -952,16 +980,10 @@ async def api_connection_test(_: str = Depends(_require_auth)):
     # validate the generated Xray config (only if binary present)
     result["config_valid"] = None
     if xray.xray_available() and result["config_exists"]:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                config.XRAY_BIN, "run", "-test", "-c", config.XRAY_CONFIG_PATH,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            _out, _err = await proc.communicate()
-            result["config_valid"] = proc.returncode == 0
-        except Exception as e:  # noqa: BLE001
-            result["config_valid"] = False
-            result["config_error"] = str(e)[:200]
+        ok, detail = xray.verify_config(config.XRAY_CONFIG_PATH)
+        result["config_valid"] = ok
+        if not ok:
+            result["config_error"] = detail
 
     # reach the public domain + WS path (only when a domain is configured)
     public = {"checked": False}
@@ -1370,6 +1392,10 @@ def _do_reload():
     try:
         xray.write_xray_config()
         xray.restart_xray()
+    except xray.ConfigError:
+        # rejected by `xray run -test`: the previously applied config keeps
+        # serving (write_xray_config already logged the reason + event)
+        pass
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -1737,6 +1763,13 @@ async def api_node_sync(request: Request):
     if payload.get("reality"):
         reality.apply_reality_config(payload["reality"])
     users = payload.get("users") or []
+    if not users and not payload.get("allow_empty"):
+        # A truncated/failed sync used to look exactly like "this node has no
+        # users" — every user on the node was then deleted. Require an explicit
+        # opt-in before an empty list is treated as authoritative.
+        db.add_event("warn", "node-sync-empty",
+                     "empty user list ignored (send allow_empty=true to apply it)")
+        return {"ok": True, "skipped": "empty-payload", "users": len(db.list_users())}
     seen: set[str] = set()
     for data in users:
         uid = (data.get("uid") or "").strip()
@@ -1878,12 +1911,14 @@ def _sub_headers(user: dict) -> dict:
     total = int(user.get("quota_bytes") or 0)
     expire = int(user.get("expire_at") or 0)
     info = f"upload={used_up}; download={used_down}; total={total}; expire={expire}"
+    # One header per name. Sending both `Subscription-Userinfo` and
+    # `subscription-userinfo` made servers/proxies join them with a comma
+    # (`upload=1; download=2, upload=1; download=2`), which some clients then
+    # failed to parse — the info header is all they need to show usage.
     return {
         "Content-Type": "text/plain; charset=utf-8",
         "Subscription-Userinfo": info,
-        "subscription-userinfo": info,
         "Profile-Update-Interval": "1",
-        "profile-update-interval": "1",
         "Profile-Title": "base64:" + base64.b64encode(user["name"].encode()).decode(),
         "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
         "Pragma": "no-cache",
@@ -1927,6 +1962,8 @@ async def health():
         wg_pub = wg.server_public_key()
     except Exception:
         wg_pub = ""
+    if config.HEALTH_MINIMAL:
+        return {"status": "ok", "ts": time.time(), "version": APP_VERSION}
     return {
         "status": "ok",
         "ts": time.time(),
