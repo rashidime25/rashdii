@@ -830,7 +830,7 @@ def _serialize_node(node: dict, status: dict) -> dict:
         out["sync"] = {
             "expected": expected,
             "on_node": status.get("users_count"),
-            "has_credential": bool(node.get("token")) or bool(config.NODE_SECRET),
+            "has_credential": bool(node.get("token")) or bool(nodesync.panel_secret(create=False)),
             # which credential the node accepted ("token" = the one issued in the
             # dashboard, "shared" = TITAN_NODE_SECRET) - shown on the node card so
             # "the push is refused" is visible instead of implied by a dead link
@@ -2178,7 +2178,7 @@ async def api_sync_node_now(node_id: int, _: str = Depends(_require_auth)):
     node = db.get_node(node_id)
     if not node or node.get("is_local"):
         raise HTTPException(404, "not-found")
-    if not (node.get("token") or config.NODE_SECRET):
+    if not (node.get("token") or nodesync.panel_secret(create=False)):
         raise HTTPException(400, "no-credential")
     users = db.list_users()
     node_users = sorted(
@@ -2491,7 +2491,7 @@ async def _probe_node_identity(addr: str, timeout: float = 6.0) -> dict:
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as cl:
                 r = await cl.get(url, headers={"User-Agent": "TiTaN-panel",
-                                               "X-TiTaN-Node-Secret": config.NODE_SECRET})
+                                               "X-TiTaN-Node-Secret": nodesync.panel_secret(create=False)})
             tried.append(f"{base} -> HTTP {r.status_code}")
             if r.status_code == 200:
                 data = r.json()
@@ -2513,7 +2513,7 @@ async def _claim_node(addr_url: str, panel_url: str, timeout: float = 8.0) -> di
     so the first panel to reach a fresh node owns it. A node that already has
     one answers 409 and the panel falls back to showing the variables instead.
     """
-    secret = config.NODE_SECRET
+    secret = nodesync.panel_secret()      # minted on first need
     if not secret:
         return {"ok": False, "error": "panel-has-no-shared-secret"}
     payload = {"secret": secret, "panel_url": (panel_url or "").rstrip("/")}

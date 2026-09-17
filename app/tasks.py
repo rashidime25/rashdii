@@ -217,16 +217,17 @@ async def _sync_nodes_loop():
 async def _report_usage_loop():
     """Node role: periodically send usage deltas back to the main panel."""
     global _pending_usage
-    if not config.IS_NODE or not config.MAIN_URL:
-        return
-    if not config.NODE_TOKEN and not config.NODE_SECRET:
+    if not config.IS_NODE:
         return
     await asyncio.sleep(20)
     while True:
         try:
             await asyncio.sleep(30)
-            if _pending_usage:
-                from . import nodes as nodesync
+            from . import nodes as nodesync
+            # Both can appear while this process is running: a node claimed from
+            # the panel learns the panel URL and the secret through bootstrap, and
+            # from then on its usage has somewhere to go.
+            if _pending_usage and nodesync.node_panel_url() and nodesync.node_credential():
                 snapshot, _pending_usage = _pending_usage, {}
                 await nodesync.report_usage(snapshot)
         except asyncio.CancelledError:

@@ -66,6 +66,28 @@ def _matches(a: str, b: str) -> bool:
     return bool(b) and secrets.compare_digest(str(a or ""), str(b))
 
 
+def panel_secret(create: bool = True) -> str:
+    """The credential this panel uses to talk to its nodes.
+
+    ``TITAN_NODE_SECRET`` when it is set. A panel that has none mints one and
+    keeps it in its own database, so the zero-variable flow works end to end: the
+    panel hands the minted secret to every node it claims over the node's own
+    address, and those nodes accept its pushes from then on. Nothing else in the
+    fleet needs to know the value, and nothing has to be typed anywhere.
+    """
+    env = str(config.NODE_SECRET or "").strip()
+    if env:
+        return env
+    stored = str(db.get_meta("panel_secret") or "").strip()
+    if stored or not create:
+        return stored
+    fresh = secrets.token_urlsafe(24)
+    db.set_meta("panel_secret", fresh)
+    log.warning("no TITAN_NODE_SECRET set — minted a fleet secret for this panel (%s…) "
+                "and will hand it to every node added by domain", fresh[:8])
+    return fresh
+
+
 def node_credential() -> str:
     """The credential this instance would accept a push with ("" = none yet).
 
@@ -103,8 +125,9 @@ def identity() -> dict:
     local = db.local_node() or {}
     cred = node_credential()
     kind = ("shared" if config.NODE_SECRET else
+            "claimed" if db.get_meta("node_secret") else
             "token" if config.NODE_TOKEN else
-            "stored" if db.get_meta("node_secret") else "")
+            "minted" if db.get_meta("panel_secret") else "")
     edge_scheme, edge_port = routing_host_port(local)
     return {
         "app": "titan",
@@ -176,6 +199,8 @@ def secret_valid_for_main(secret: str) -> bool:
     """Main side: accept a report/registration from a node."""
     if _matches(secret, config.NODE_SECRET):
         return True
+    if _matches(secret, panel_secret(create=False)):
+        return True
     return db.get_node_by_token(secret) is not None
 
 
@@ -210,7 +235,7 @@ def _sync_secrets(node: dict) -> list[tuple[str, str]]:
     (``node_secret_kind:`` meta) and offered first next time.
     """
     token = (node.get("token") or "").strip()
-    shared = (config.NODE_SECRET or "").strip()
+    shared = panel_secret(create=False).strip()
     pairs = [("token", token), ("shared", shared)]
     if db.get_meta(f"node_secret_kind:{node['id']}") == "shared":
         pairs.reverse()
@@ -350,13 +375,14 @@ async def sync_all() -> dict[str, bool]:
 
 async def report_usage(usage: dict[str, dict], timeout: float = 8.0) -> bool:
     """Send per-user traffic deltas back to the main panel (node role)."""
-    secret = config.NODE_TOKEN or config.NODE_SECRET
-    if not config.MAIN_URL or not secret or not usage:
+    secret = node_credential()
+    main_url = node_panel_url()
+    if not main_url or not secret or not usage:
         return False
     payload = {"secret": secret, "usage": usage}
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as cl:
-            r = await cl.post(f"{config.MAIN_URL}/api/node/usage", json=payload)
+            r = await cl.post(f"{main_url}/api/node/usage", json=payload)
             return r.status_code == 200
     except Exception as e:  # noqa: BLE001
         log.warning("usage report failed: %s", e)

@@ -51,6 +51,7 @@ def test_a_node_answers_an_identity_card_without_leaking_anything(panel, monkeyp
     monkeypatch.setattr(m.config, "NODE_SECRET", "")   # nothing configured yet
     monkeypatch.setattr(m.config, "NODE_TOKEN", "")
     db.set_meta("node_secret", "")
+    db.set_meta("panel_secret", "")          # the panel may have minted one by now
     db.set_local_node_location("Frankfurt", "Germany", "DE", "🇩🇪")
     r = panel.get("/api/node/discover")
     assert r.status_code == 200, r.text
@@ -64,7 +65,8 @@ def test_a_node_answers_an_identity_card_without_leaking_anything(panel, monkeyp
     db.set_meta("node_secret", "panel-shared-secret-abcdef123456")
     authed = panel.get("/api/node/discover",
                        headers={"X-TiTaN-Node-Secret": "panel-shared-secret-abcdef123456"}).json()
-    assert "users" in authed and authed["credential"] == "stored"
+    assert "users" in authed and authed["credential"] == "claimed", \
+        "an authenticated caller sees the fuller card, including a claimed secret"
 
 
 def test_a_fresh_node_accepts_one_claim_and_then_locks(panel, monkeypatch):
@@ -73,6 +75,7 @@ def test_a_fresh_node_accepts_one_claim_and_then_locks(panel, monkeypatch):
     monkeypatch.setattr(m.config, "NODE_SECRET", "")
     monkeypatch.setattr(m.config, "NODE_TOKEN", "")
     db.set_meta("node_secret", "")
+    db.set_meta("panel_secret", "")
 
     first = panel.post("/api/node/bootstrap",
                        json={"secret": "owner-secret-0123456789", "panel_url": "https://panel.example"})
@@ -250,3 +253,58 @@ def test_the_shared_secret_is_what_gets_handed_over(panel, monkeypatch):
     assert sent["url"] == "https://node.example.com/api/node/bootstrap"
     assert sent["json"]["secret"] == "panel-shared-secret-abcdef123456"
     assert sent["json"]["panel_url"] == "https://panel.example"
+
+def test_a_panel_with_no_secret_mints_one_and_uses_it(panel, monkeypatch):
+    """Nobody typed a variable anywhere, and the node still gets users.
+
+    A panel deployed without TITAN_NODE_SECRET used to have nothing to hand over,
+    so "claim this node" could not work: the claim carries the panel's secret.
+    The panel now mints one on first need, keeps it in its own database, offers it
+    to nodes and accepts what they report back with it.
+    """
+    monkeypatch.setattr(m.config, "NODE_SECRET", "")
+    db.set_meta("panel_secret", "")
+    minted = nodesync.panel_secret()
+    assert len(minted) >= 24, "the minted secret is long enough to be one"
+    assert nodesync.panel_secret() == minted, "it is stable, not regenerated per call"
+    assert db.get_meta("panel_secret") == minted
+    # it is offered to nodes as the shared credential ...
+    pairs = dict((kind, sec) for sec, kind in nodesync._sync_secrets({"id": 2, "token": "per-node"}))
+    assert pairs["shared"] == minted and pairs["token"] == "per-node"
+    # ... and reports signed with it are accepted back
+    assert nodesync.secret_valid_for_main(minted) is True
+    assert nodesync.secret_valid_for_main("nope") is False
+    # an explicit env value always wins and is never replaced by the minted one
+    monkeypatch.setattr(m.config, "NODE_SECRET", "typed-secret-0123456789")
+    assert nodesync.panel_secret() == "typed-secret-0123456789"
+    assert db.get_meta("panel_secret") == minted, "minting does not overwrite anything"
+
+
+def test_claiming_carries_the_minted_secret_when_no_env_is_set(panel, monkeypatch):
+    monkeypatch.setattr(m.config, "NODE_SECRET", "")
+    db.set_meta("panel_secret", "")
+    sent = {}
+
+    class _Resp:
+        status_code = 200
+        text = '{"ok": true}'
+
+        @staticmethod
+        def json():
+            return {"ok": True, "claimed": True}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            sent["json"] = json
+            return _Resp()
+
+    monkeypatch.setattr(m.httpx, "AsyncClient", lambda **kw: _Client())
+    out = __import__("asyncio").run(m._claim_node("https://node.example.com", "https://panel.example"))
+    assert out["ok"] is True
+    assert sent["json"]["secret"] == db.get_meta("panel_secret") != ""
