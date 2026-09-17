@@ -16,7 +16,6 @@ import sys
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from conftest import REPO  # noqa: E402
 from app import config  # noqa: E402
 
 H = {"Origin": "http://testserver"}
@@ -84,8 +83,19 @@ def test_a_tcp_proxy_brings_raw_transports_back(admin, make_user, monkeypatch):
     assert "shuttle.proxy.rlwy.net:23456" in u["main_link"], u["main_link"]
 
 
+def _serving_node(admin, node_id, uid):
+    """Record a successful sync - the node now demonstrably has this user."""
+    from app import routing
+    routing.record_sync(node_id, True, uids=[uid])
+
+
 def test_a_railway_node_keeps_only_its_edge_port(admin, edge_only):
-    """A node's address port is its *internal* port - unreachable from outside."""
+    """A node's address port is its *internal* port - unreachable from outside.
+
+    The node's link is only advertised once the node is *known* to serve the
+    user (a successful sync naming them). Before that the panel keeps the link:
+    an unverified node is exactly how "the node config times out" happens.
+    """
     r = admin.post("/api/nodes", headers=H, json={
         "name": "edge-node", "address": "titan-node-abc.up.railway.app:443",
         "city": "Frankfurt", "country": "Germany", "country_code": "DE"})
@@ -96,6 +106,14 @@ def test_a_railway_node_keeps_only_its_edge_port(admin, edge_only):
         "security": "reality", "node_id": node_id})
     assert r2.status_code == 200, r2.text
     u = r2.json()["user"]
+
+    # Not verified yet: the panel serves it (and says so) instead of handing out
+    # a link to a node that may have nothing for this user.
+    assert "titan-node-abc.up.railway.app" not in u["main_link"], u["main_link"]
+    assert any("panel" in w for w in (u.get("edge_warnings") or [])), u.get("edge_warnings")
+
+    _serving_node(admin, node_id, u["uid"])
+    u = admin.get(f"/api/users/{u['uid']}", headers=H).json()
     link = u["main_link"]
     assert "titan-node-abc.up.railway.app" in link
     assert ":443" in link, link
@@ -104,8 +122,14 @@ def test_a_railway_node_keeps_only_its_edge_port(admin, edge_only):
     admin.delete(f"/api/nodes/{node_id}")
 
 
-def test_a_vps_node_with_an_exposed_port_keeps_it(admin, edge_only):
-    """The opposite case must keep working: a plain host with a real open port."""
+def test_a_vps_node_that_publishes_its_raw_port_keeps_reality(admin, edge_only):
+    """The opposite case must keep working: a verified host with an open port.
+
+    A node's raw port is the fleet's port for that transport (every deployment
+    runs the same inbound map), not the port in its address - that one is the
+    node's HTTP edge, and Reality is not served there.
+    """
+    from app import config, routing
     r = admin.post("/api/nodes", headers=H, json={
         "name": "vps-node", "address": "203.0.113.9:8443",
         "city": "Tehran", "country": "Iran", "country_code": "IR"})
@@ -114,8 +138,35 @@ def test_a_vps_node_with_an_exposed_port_keeps_it(admin, edge_only):
         "name": "vps-user", "protocol": "vless", "transport": "tcp",
         "security": "reality", "node_id": node_id})
     u = r2.json()["user"]
-    assert ":8443" in u["main_link"], u["main_link"]
+    _serving_node(admin, node_id, u["uid"])
+    routing.record_raw_probe(node_id, {config.XRAY_TCP_VLESS_REALITY_PORT: True})
+    u = admin.get(f"/api/users/{u['uid']}", headers=H).json()
+    assert f":{config.XRAY_TCP_VLESS_REALITY_PORT}" in u["main_link"], u["main_link"]
     assert "security=reality" in u["main_link"]
+    admin.delete(f"/api/nodes/{node_id}")
+
+
+def test_a_node_that_does_not_answer_its_raw_port_never_gets_it_in_a_link(admin, edge_only):
+    """Measured closed: the raw port must not reach a client, on any transport.
+
+    This is the node-side twin of the Railway edge problem - the link moves to
+    the node's HTTPS edge (so the location is kept) instead of hanging.
+    """
+    from app import config, routing
+    r = admin.post("/api/nodes", headers=H, json={
+        "name": "closed-node", "address": "node.example.com",
+        "city": "Amsterdam", "country": "Netherlands", "country_code": "NL"})
+    node_id = r.json()["node"]["id"]
+    r2 = admin.post("/api/users", headers=H, json={
+        "name": "closed-user", "protocol": "vless", "transport": "tcp",
+        "security": "reality", "node_id": node_id})
+    u = r2.json()["user"]
+    _serving_node(admin, node_id, u["uid"])
+    routing.record_raw_probe(node_id, {config.XRAY_TCP_VLESS_REALITY_PORT: False})
+    u = admin.get(f"/api/users/{u['uid']}", headers=H).json()
+    assert "node.example.com" in u["main_link"], u["main_link"]
+    assert _no_raw_port(u["main_link"]), u["main_link"]
+    assert "type=xhttp" in u["main_link"] and "security=tls" in u["main_link"]
     admin.delete(f"/api/nodes/{node_id}")
 
 
@@ -128,7 +179,7 @@ def test_edge_check_names_the_cause(admin, edge_only):
     assert "proxy_in_front" in data
     assert data["public"]["port"] == config.PUBLIC_PORT or data["public"]["port"] == 443
     assert set(data["transports"]) >= {"vless+ws", "vless+xhttp", "vless+grpc"}
-    for name, info in data["transports"].items():
+    for _name, info in data["transports"].items():
         assert "status" in info and "alive" in info
     assert data["raw_ports"]["XRAY_TCP_VLESS_REALITY_PORT"] == config.XRAY_TCP_VLESS_REALITY_PORT
     assert "TCP proxy" in data["note"] or "TCP proxy" in data["note"]

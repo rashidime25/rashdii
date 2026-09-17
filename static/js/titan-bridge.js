@@ -6,6 +6,33 @@
   function fmtBytes(b){ b=Number(b)||0; if(b===0) return '0 B'; const u=['B','KB','MB','GB','TB']; let i=0; while(b>=1024&&i<u.length-1){b/=1024;i++;} return (i===0?b:b.toFixed(b>=10?1:2).replace(/\.0+$/,''))+' '+u[i]; }
   function esc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
   function flagFor(cc){ cc=(cc||'').toUpperCase().trim(); if(/^[A-Z]{2}$/.test(cc)) return String.fromCodePoint(...[...cc].map(c=>0x1F1E6+c.charCodeAt(0)-65)); return '🏳️'; }
+
+  // ── premium icon set (inline SVG, stroke = currentColor) ──────────────────
+  const ICONS = {
+    bolt:'<path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5z"/>',
+    sparkle:'<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M18.5 15.5l.7 1.9 1.8.6-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.6.7-1.9z"/>',
+    userplus:'<circle cx="9" cy="8" r="3.2"/><path d="M3 20c.7-3.6 3-5.7 6-5.7s5.3 2.1 6 5.7"/><path d="M18 8v6M15 11h6"/>',
+    link:'<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
+    edit:'<path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/>',
+    trash:'<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>',
+    copy:'<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+    qr:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v1M14 20h1M18 18h3"/>',
+    eye:'<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
+    pulse:'<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+    sync:'<path d="M21 12a9 9 0 0 1-15.3 6.4M3 12a9 9 0 0 1 15.3-6.4"/><path d="M21 4v6h-6M3 20v-6h6"/>',
+    power:'<path d="M18.4 6.6a9 9 0 1 1-12.8 0"/><path d="M12 2v10"/>',
+    download:'<path d="M12 3v12m0 0 4.5-4.5M12 15l-4.5-4.5"/><path d="M4 19h16"/>',
+  };
+  function icon(name, size=17, width=1.8){
+    const body = ICONS[name] || ICONS.sparkle;
+    return `<svg viewBox="0 0 24 24" style="width:${size}px;height:${size}px;fill:none;stroke:currentColor;stroke-width:${width};stroke-linecap:round;stroke-linejoin:round" aria-hidden="true">${body}</svg>`;
+  }
+  // A premium icon button: no Persian word on the face, the label lives in the tooltip.
+  function icoBtn(attrs, name, tip, variant=''){
+    const a = Object.entries(attrs||{}).map(([k,v])=>`${k}="${esc(v)}"`).join(' ');
+    return `<button class="ico-btn${variant?' '+variant:''}" data-tip="${esc(tip)}" aria-label="${esc(tip)}" ${a}>${icon(name)}</button>`;
+  }
+
   function fmtDate(ts){ try{ return new Date(ts*1000).toLocaleDateString('fa-IR'); }catch(e){ return '—'; } }
   async function apiJson(url, opts={}){ opts.credentials='same-origin'; opts.headers=Object.assign({'Content-Type':'application/json'},opts.headers||{}); if(opts.body&&typeof opts.body!=='string') opts.body=JSON.stringify(opts.body); const r=await fetch(url,opts); let d={}; try{d=await r.json();}catch(e){ if(!r.ok) throw new Error(r.statusText); } if(!r.ok) throw new Error(d.detail||d.message||r.statusText); return d; }
 
@@ -164,10 +191,11 @@
       if(srvContent){
         if(nodes.length){
           srvContent.innerHTML=nodes.slice(0,4).map(n=>{
-            const st=n.status||{}; const lat=st.latency_ms!=null?st.latency_ms+'ms':'—';
+            const st=n.status||{}; const lat=(st.latency_ms!=null?Number(st.latency_ms):null);
             const city=(n.city && n.city!=='—')?n.city:n.name; const cc=(n.country_code||'').toUpperCase();
-            const flag=n.flag||flagFor(cc)||'🌐'; const on=n.enabled && st.online;
-            return `<div class="server-row"><div class="latency">${esc(lat)}<small>تاخیر</small></div><div class="status" style="color:${on?'#39e1b9':'#ff6b8a'}">${on?'آنلاین':'آفلاین'}</div><div class="location"><span class="flag">${esc(flag)}</span><span>${esc(city)}${cc?' · '+cc:''}</span></div></div>`;
+            const flag=n.flag||flagFor(cc)||'🌐'; const on=!!(n.enabled!==false && st.online);
+            const pc=!on?'off':(lat==null?'off':(lat<90?'good':(lat<200?'mid':'bad')));
+            return `<div class="server-row" title="${esc(n.name)}"><div class="latency ping ${pc}">${lat!=null?lat+'ms':'—'}<small>تاخیر</small></div><div class="status ${on?'on':'off'}">${on?'آنلاین':'آفلاین'}</div><div class="location"><span class="sr-medal">${esc(flag)}</span><span><span class="sr-name">${esc(n.name)}</span><span class="sr-loc">${esc(city)}${cc?' · '+cc:''}</span></span></div></div>`;
           }).join('');
         } else srvContent.innerHTML='<div style="color:#8586a8;font-size:11px;padding:12px">سروری ثبت نشده است.</div>';
       }
@@ -405,7 +433,7 @@
               const st=u.status||{}; const used=fmtBytes(st.used||0);
               const days=u.expire_at? Math.max(0,Math.ceil((u.expire_at - Date.now()/1000)/86400))+' روز':'هرگز';
               const label=st.expired?'منقضی':(!u.enabled?'غیرفعال':'فعال'); const cls=st.expired?'warn':(!u.enabled?'off':'');
-              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td class="muted">#${esc(u.uid.slice(0,6))}</td><td>${esc(used)}</td><td>${esc(days)}</td><td><span class="pill ${cls}">${esc(label)}</span></td><td><button class="mini-btn" data-uid="${esc(u.uid)}" data-act="edit">ویرایش</button> <button class="mini-btn" data-uid="${esc(u.uid)}" data-act="detail">لینک</button> <button class="mini-btn" data-uid="${esc(u.uid)}" data-act="del" style="color:#ff8297">حذف</button></td></tr>`;
+              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td class="muted">#${esc(u.uid.slice(0,6))}</td><td>${esc(used)}</td><td>${esc(days)}</td><td><span class="pill ${cls}">${esc(label)}</span></td><td><div class="row-actions">${icoBtn({"data-uid":u.uid,"data-act":"edit"},"edit","ویرایش کاربر","gold")}${icoBtn({"data-uid":u.uid,"data-act":"detail"},"link","کپی لینک اتصال","violet")}${icoBtn({"data-uid":u.uid,"data-act":"del"},"trash","حذف","danger")}</div></td></tr>`;
             }).join('') : '<tr><td colspan="6" style="text-align:center;color:#8586a8">کاربری وجود ندارد</td></tr>';
             tbody.querySelectorAll('[data-act="del"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; if(!confirm('حذف کاربر؟')) return; try{ await apiJson('/api/users/'+uid,{method:'DELETE'}); toast('حذف شد'); refreshUsers(); loadOverview(); }catch(e){toast(e.message);} }));
             tbody.querySelectorAll('[data-act="detail"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const d=await apiJson('/api/users/'+uid+'/links'); await navigator.clipboard.writeText(d.main_link||d.links[0]); toast('لینک کپی شد'); }catch(e){toast(e.message);} }));
@@ -443,7 +471,7 @@
             tbody.innerHTML=users.length? users.map(u=>{
               const n=nodeMap[u.node_id||1]; const loc=n?((n.city&&n.city!=='—')?n.city:n.name):'—'; const flag=n?(n.flag||flagFor(n.country_code)||'🌐'):'🌐';
               const st=u.status||{}; const label=st.expired?'منقضی':(!u.enabled?'غیرفعال':'فعال'); const cls=st.expired?'warn':(!u.enabled?'off':'');
-              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td>${esc((u.protocol||'').toUpperCase())}</td><td>${esc(flag)} ${esc(loc)}</td><td>${u.expire_at? fmtDate(u.expire_at):'هرگز'}</td><td><span class="pill ${cls}">${esc(label)}</span></td><td><button class="mini-btn" data-uid="${esc(u.uid)}" data-act="edit">ویرایش</button> <button class="mini-btn" data-uid="${esc(u.uid)}" data-act="links">لینک</button> <button class="mini-btn" data-uid="${esc(u.uid)}" data-act="del" style="color:#ff8297">حذف</button></td></tr>`;
+              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td>${esc((u.protocol||'').toUpperCase())}</td><td>${esc(flag)} ${esc(loc)}</td><td>${u.expire_at? fmtDate(u.expire_at):'هرگز'}</td><td><span class="pill ${cls}">${esc(label)}</span></td><td><div class="row-actions">${icoBtn({"data-uid":u.uid,"data-act":"edit"},"edit","ویرایش کانفیگ","gold")}${icoBtn({"data-uid":u.uid,"data-act":"links"},"link","کپی لینک اتصال","violet")}${icoBtn({"data-uid":u.uid,"data-act":"del"},"trash","حذف","danger")}</div></td></tr>`;
             }).join('') : '<tr><td colspan="6" style="text-align:center;color:#8586a8">کانفیگی وجود ندارد</td></tr>';
             tbody.querySelectorAll('[data-act="del"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; if(!confirm('حذف کانفیگ؟')) return; try{ await apiJson('/api/users/'+uid,{method:'DELETE'}); toast('حذف شد'); refreshConfigs(); loadOverview(); }catch(e){toast(e.message);} }));
             tbody.querySelectorAll('[data-act="links"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const d=await apiJson('/api/users/'+uid+'/links'); await navigator.clipboard.writeText(d.main_link||d.links[0]); toast('لینک کپی شد'); }catch(e){toast(e.message);} }));
@@ -470,20 +498,125 @@
             const avgLat = (()=>{ const v=nodes.map(n=>n.status&&n.status.latency_ms).filter(x=>x!=null); return v.length? Math.round(v.reduce((a,b)=>a+b,0)/v.length)+' ms' : '—'; })();
             grid.children[1].innerHTML=`<h3>سلامت اتصال</h3><div class="metric-row"><span>میانگین پینگ</span><strong>${avgLat}</strong></div><div class="metric-row"><span>پایداری</span><strong>${online===total&&total>0?'99.9%':'—'}</strong></div><div class="progress"><span style="width:${total?Math.round((online/total)*100):0}%"></span></div>`;
           }
-          let list=serversSection.querySelector('.server-list');
-          if(!list){
-            list=document.createElement('div'); list.className='detail-card data-card server-list'; list.style.marginTop='14px';
-            list.innerHTML='<div class="card-title"><h3 style="margin:0">فهرست سرورها</h3></div><div class="table-scroll"><table class="data-table"><thead><tr><th>نام</th><th>آدرس</th><th>وضعیت</th><th>پینگ</th><th>عملیات</th></tr></thead><tbody></tbody></table></div>';
-            serversSection.appendChild(list);
+          // ── luxury node cards ────────────────────────────────────────────
+          // Everything the panel actually knows about a node is on the card:
+          // liveness, latency dial, the edge it answers on, whether its raw port
+          // is open, and whether its last sync really carried the users.
+          const pingClass=(on,lat)=> !on?'off' : (lat==null?'off':(lat<90?'good':(lat<200?'mid':'bad')));
+          const ring=(on,lat)=>{
+            const R=26, C=2*Math.PI*R;
+            const pct= lat==null?0:Math.max(4,Math.min(100,100-Math.min(lat,400)/4));
+            const col= !on?'rgba(255,255,255,.18)':(lat==null?'rgba(255,255,255,.18)':(lat<90?'#31dcb9':(lat<200?'#d9b55f':'#ff6b8a')));
+            return `<div class="nl-dial-wrap"><svg class="ring" viewBox="0 0 68 68"><circle class="rg-bg" cx="34" cy="34" r="${R}"></circle>`+
+                   `<circle class="rg-fg" cx="34" cy="34" r="${R}" stroke="${col}" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${(C-(C*pct/100)).toFixed(1)}"></circle></svg>`+
+                   `<div class="rg-txt" style="color:${col}">${lat!=null?lat:'—'}</div></div>`;
+          };
+          const bar=(k,v)=>{
+            const n=(v==null?null:Math.max(0,Math.min(100,Math.round(v))));
+            const cls= n==null?'':(n>=90?' hot':(n>=70?' warm':''));
+            return `<div class="nl-metric${cls}"><div class="k">${k}</div><div class="v">${n!=null?n+'%':'—'}</div><div class="bar"><i style="width:${n||0}%"></i></div></div>`;
+          };
+          const seen=(ts)=> ts? new Date(ts*1000).toLocaleString('fa-IR',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
+          function nodeCaps(n,on){
+            const st=n.status||{}; const caps=[];
+            caps.push(`<span class="nl-cap ${on?'ok':'bad'}"><span class="dotm"></span>${on?'آنلاین':'آفلاین'}</span>`);
+            if(n.is_local) caps.push('<span class="nl-cap warn"><span class="dotm"></span>سرور اصلی</span>');
+            else if(n.enabled===false) caps.push('<span class="nl-cap warn"><span class="dotm"></span>حالت نگهداری</span>');
+            const addr=(n.address||'').replace(/^https?:\/\//,'');
+            if(addr) caps.push(`<span class="nl-cap" dir="ltr" title="${esc(addr)}">${icon('link',12,1.9)}${esc(addr.length>26?addr.slice(0,26)+'…':addr)}</span>`);
+            if(n.edge && n.edge.port) caps.push(`<span class="nl-cap ${n.edge.measured?'ok':''}" dir="ltr">edge ${esc(n.edge.scheme||'https')} :${esc(n.edge.port)}</span>`);
+            const raw=n.raw_open||{};
+            raw && Object.keys(raw).forEach(port=>{
+              const open=raw[port]===true;
+              caps.push(`<span class="nl-cap ${open?'ok':'bad'}" dir="ltr">raw ${esc(port)} ${open?'✓':'✕'}</span>`);
+            });
+            const sync=n.sync;
+            if(sync){
+              if(sync.ok===true){
+                const serv=(sync.serving||[]).length;
+                const exp=sync.expected!=null?sync.expected:serv;
+                caps.push(`<span class="nl-cap ok"><span class="dotm"></span>sync ${serv}/${exp} ✓</span>`);
+              } else if(sync.ok===false){
+                caps.push(`<span class="nl-cap bad"><span class="dotm"></span>sync ${esc(sync.error||'failed')}</span>`);
+              }
+            } else if(!st.online){
+              caps.push('<span class="nl-cap"><span class="dotm"></span>sync نامشخص</span>');
+            }
+            return caps.join('');
           }
-          const tbody=list.querySelector('tbody');
-          tbody.innerHTML=nodes.length? nodes.map(n=>{
-            const st=n.status||{}; const on=n.enabled && st.online; const flag=n.flag||flagFor(n.country_code)||'🌐';
-            return `<tr><td>${esc(flag)} ${esc(n.name)}</td><td style="direction:ltr">${esc(n.address||'—')}</td><td><span class="pill ${on?'':'off'}">${on?'آنلاین':'آفلاین'}</span></td><td>${st.latency_ms!=null?st.latency_ms+'ms':'—'}</td><td><button class="mini-btn" data-id="${n.id}" data-act="ping">بررسی</button> <button class="mini-btn" data-id="${n.id}" data-act="edit">ویرایش</button> ${!n.is_local?'<button class="mini-btn" data-id="'+n.id+'" data-act="del" style="color:#ff8297">حذف</button>':''}</td></tr>`;
-          }).join('') : '<tr><td colspan="5" style="text-align:center;color:#8586a8">سروری وجود ندارد</td></tr>';
-          tbody.querySelectorAll('[data-act="ping"]').forEach(b=> b.addEventListener('click', async()=>{ const id=b.dataset.id; b.disabled=true; const old=b.textContent; b.textContent='...'; try{ await apiJson('/api/nodes/'+id+'/ping',{method:'POST'}); toast('بررسی شد'); refreshServers(); loadOverview(); }catch(e){toast(e.message);} finally{ b.disabled=false; b.textContent=old; } }));
-          tbody.querySelectorAll('[data-act="edit"]').forEach(b=> b.addEventListener('click', async()=>{ const id=b.dataset.id; try{ const n=(await apiJson('/api/nodes')).nodes.find(x=>String(x.id)===String(id)); if(n) await openNodeModal(n); }catch(e){toast(e.message);} }));
-          tbody.querySelectorAll('[data-act="del"]').forEach(b=> b.addEventListener('click', async()=>{ const id=b.dataset.id; if(!confirm('حذف سرور؟')) return; try{ await apiJson('/api/nodes/'+id,{method:'DELETE'}); toast('حذف شد'); refreshServers(); loadOverview(); }catch(e){toast(e.message);} }));
+          function nodeCard(n){
+            const st=n.status||{}; const on=!!(n.enabled!==false && st.online);
+            const lat=(st.latency_ms!=null?Number(st.latency_ms):null);
+            const cc=(n.country_code||'').toUpperCase(); const flag=n.flag||flagFor(cc);
+            const city=(n.city && n.city!=='—')?n.city:'';
+            const loc=[city||n.name, cc].filter(Boolean).join(' · ');
+            const sync=n.sync||{}; const stale=(sync.ok===true && sync.at && (Date.now()/1000 - sync.at)>900);
+            const note = !on ? `آخرین تماس: ${seen(n.last_seen)}${st.reason?' · '+esc(st.reason):''}`
+                        : (sync.ok===false ? `آخرین همگام‌سازی ناموفق بود (${esc(sync.error||'error')}) — کاربران این نود از پنل سرو می‌شوند.`
+                        : (stale ? `همگام‌سازی قدیمی است (${seen(sync.at)}) — یک بار همگام‌سازی فوری بزن.`
+                        : (sync.ok===true ? '' : 'وضعیت همگام‌سازی هنوز اندازه‌گیری نشده است.')));
+            return `<article class="node-lux ${on?'':'offline'}${n.is_local?' local':''}" data-node="${n.id}">
+              <div class="nl-top">
+                <div class="nl-medal"><span class="fe">${esc(flag)}</span></div>
+                <div style="flex:1;min-width:0">
+                  <div class="nl-name"><span class="nl-orb ${on?'':'off'}"></span>${esc(n.name||'node')}</div>
+                  <div class="nl-loc">${esc(loc)}</div>
+                </div>
+                <span class="pill ${on?'':'off'}">${on?'آنلاین':'آفلاین'}</span>
+              </div>
+              <div class="nl-dial">${ring(on,lat)}
+                <div><div class="nl-dial-val">${lat!=null?lat+' ms':'—'}</div><div class="nl-dial-lbl">تأخیر</div></div>
+              </div>
+              <div class="nl-caps">${nodeCaps(n,on)}</div>
+              <div class="nl-metrics">${bar('CPU',st.cpu)}${bar('RAM',st.ram)}${bar('DISK',st.disk)}</div>
+              <div class="nl-meta">
+                <span>نسخه: <b>${esc(st.version||'—')}</b></span>
+                <span>کاربر روی نود: <b>${sync.on_node!=null?esc(sync.on_node):'—'}</b></span>
+                <span>اپ‌تایم: <b>${st.uptime?esc(String(st.uptime)):'—'}</b></span>
+              </div>
+              ${note?`<div class="nl-note${(sync.ok===false&&on)?' bad':''}">${note}</div>`:''}
+              <div class="nl-actions">
+                ${icoBtn({'data-id':n.id,'data-act':'ping'},'pulse','بررسی اتصال')}
+                ${icoBtn({'data-id':n.id,'data-act':'sync'},'sync','همگام‌سازی فوری','violet')}
+                ${icoBtn({'data-id':n.id,'data-act':'edit'},'edit','ویرایش نود','gold')}
+                <span class="spacer"></span>
+                ${n.is_local?'':icoBtn({'data-id':n.id,'data-act':'toggle'},'power',n.enabled===false?'خروج از حالت نگهداری':'حالت نگهداری',n.enabled===false?'ok':'')}
+                ${n.is_local?'':icoBtn({'data-id':n.id,'data-act':'del'},'trash','حذف نود','danger')}
+              </div>
+            </article>`;
+          }
+          let grid2=serversSection.querySelector('.node-grid');
+          if(!grid2){
+            grid2=document.createElement('div'); grid2.className='node-grid'; grid2.id='nodeGrid';
+            serversSection.appendChild(grid2);
+          }
+          grid2.innerHTML=nodes.length? nodes.map(nodeCard).join('')
+            : '<div class="detail-card" style="grid-column:1/-1"><div class="metric-row"><span class="muted">سروری ثبت نشده است — با دکمهٔ افزودن سرور یک نود بساز.</span></div></div>';
+          grid2.querySelectorAll('[data-act]').forEach(b=> b.addEventListener('click', async()=>{
+            const id=b.dataset.id; const act=b.dataset.act;
+            if(act==='ping'){
+              b.disabled=true;
+              try{ await apiJson('/api/nodes/'+id+'/ping',{method:'POST'}); toast('بررسی شد'); refreshServers(); loadOverview(); }
+              catch(e){ toast(e.message); } finally{ b.disabled=false; }
+            } else if(act==='sync'){
+              b.disabled=true;
+              try{ await apiJson('/api/nodes/'+id+'/sync',{method:'POST'}); toast('همگام‌سازی شد'); refreshServers(); }
+              catch(e){ toast(e.message); } finally{ b.disabled=false; }
+            } else if(act==='edit'){
+              try{ const n=(await apiJson('/api/nodes')).nodes.find(x=>String(x.id)===String(id)); if(n) await openNodeModal(n); }
+              catch(e){ toast(e.message); }
+            } else if(act==='toggle'){
+              try{
+                const cur=(await apiJson('/api/nodes')).nodes.find(x=>String(x.id)===String(id));
+                await apiJson('/api/nodes/'+id,{method:'PATCH',body:{enabled:!(cur&&cur.enabled)}});
+                toast(cur&&cur.enabled?'به حالت نگهداری رفت':'از حالت نگهداری خارج شد'); refreshServers(); loadOverview();
+              }catch(e){ toast(e.message); }
+            } else if(act==='del'){
+              if(!confirm('حذف سرور؟')) return;
+              try{ await apiJson('/api/nodes/'+id,{method:'DELETE'}); toast('حذف شد'); refreshServers(); loadOverview(); }
+              catch(e){ toast(e.message); }
+            }
+          }));
         }catch(e){ console.error(e); }
       }
       refreshServers();
@@ -501,7 +634,7 @@
             tbody.innerHTML=users.length? users.map(u=>{
               const st=u.status||{}; const label=st.expired?'منقضی':(!u.enabled?'غیرفعال':'فعال'); const cls=st.expired?'warn':(!u.enabled?'off':'');
               const exp=u.expire_at? new Date(u.expire_at*1000).toLocaleDateString('fa-IR') : 'هرگز';
-              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td><span class="pill ${cls}">${esc(label)}</span></td><td>${esc(exp)}</td><td>1</td><td>${esc(fmtBytes(st.used||0))}</td><td><button class="mini-btn" data-uid="${u.uid}" data-act="copy">کپی</button><button class="mini-btn" data-uid="${u.uid}" data-act="qr">QR</button><button class="mini-btn" data-uid="${u.uid}" data-act="view">نمایش</button></td></tr>`;
+              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td><span class="pill ${cls}">${esc(label)}</span></td><td>${esc(exp)}</td><td>1</td><td>${esc(fmtBytes(st.used||0))}</td><td><div class="row-actions">${icoBtn({"data-uid":u.uid,"data-act":"copy"},"copy","کپی لینک اشتراک","violet")}${icoBtn({"data-uid":u.uid,"data-act":"qr"},"qr","تصویر QR","gold")}${icoBtn({"data-uid":u.uid,"data-act":"view"},"eye","کپی لینک اتصال","ok")}</div></td></tr>`;
             }).join('') : '<tr><td colspan="6" style="text-align:center;color:#8586a8">اشتراکی وجود ندارد</td></tr>';
             tbody.querySelectorAll('[data-act="copy"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const d=await apiJson('/api/users/'+uid+'/links'); await navigator.clipboard.writeText(d.sub_url); toast('اشتراک کپی شد'); }catch(e){toast(e.message);} }));
             tbody.querySelectorAll('[data-act="qr"]').forEach(b=> b.addEventListener('click', ()=>{ const uid=b.dataset.uid; window.open('/api/users/'+uid+'/qr','_blank'); }));

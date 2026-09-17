@@ -20,7 +20,7 @@ import secrets
 
 import httpx
 
-from . import config, db
+from . import config, db, routing
 
 log = logging.getLogger("titan.nodes")
 
@@ -43,31 +43,21 @@ def user_node_id(u: dict) -> int:
 
 
 def local_users() -> list[dict]:
-    """Users whose traffic this process must serve.
+    """Users whose traffic this process must serve: all of them.
 
-    On the main panel only users assigned to the *local* node are served here;
-    users on node_id=0 (auto) are served by remote nodes, so they are excluded
-    — unless no remote node exists, in which case they fall back to local.
-    On a node, every synced user is local.
+    A node serves everyone the panel pushed to it. The *main panel* used to serve
+    only the users assigned to its local node, which made a link and the server
+    behind it disagree: a user whose node was disabled, never registered, or whose
+    sync had failed got a link pointing at that node while the panel refused to
+    serve them — the client connected and waited for its own timeout (traced in
+    the field). See ``routing`` for the link-side half of the rule.
+
+    So the panel keeps *every* user ready: the link still points at the node when
+    the node is verifiably serving that user, and it falls back to the panel the
+    moment it is not. Serving both costs one config entry per user and removes a
+    whole class of "config times out".
     """
-    users = db.list_users()
-    if config.IS_NODE:
-        return users
-    local_ids = {n["id"] for n in db.list_nodes() if n.get("is_local")}
-    has_remote = any(
-        not n.get("is_local") and n.get("enabled") and (n.get("address") or "").strip()
-        for n in db.list_nodes()
-    )
-
-    def served(u: dict) -> bool:
-        nid = user_node_id(u)
-        if nid in local_ids:
-            return True
-        if nid == 0 and not has_remote:
-            return True  # no remote node: serve auto users locally
-        return False
-
-    return [u for u in users if served(u)]
+    return db.list_users()
 
 
 def _matches(a: str, b: str) -> bool:
@@ -130,10 +120,17 @@ def _reality_payload() -> dict | None:
 
 
 async def sync_node(node: dict, users: list[dict], timeout: float = 8.0) -> bool:
-    """Push a node's full user list to it. Returns True on success."""
+    """Push a node's full user list to it. Returns True on success.
+
+    The outcome (and, on success, the exact uid set the node now has) is recorded
+    so link building can tell "this node really has this user" from "we hoped it
+    did" — that difference is the whole reason a node config used to time out.
+    """
     url = _node_url(node)
     if not url or not _sync_secret(node):
+        routing.record_sync(node["id"], False, err="no-address-or-credential")
         return False
+    uids = [u["uid"] for u in users]
     payload = {
         "secret": _sync_secret(node),
         "users": [user_sync_payload(u) for u in users],
@@ -145,9 +142,12 @@ async def sync_node(node: dict, users: list[dict], timeout: float = 8.0) -> bool
             ok = r.status_code == 200
             if not ok:
                 log.warning("node sync failed for %s: HTTP %s", url, r.status_code)
+            routing.record_sync(node["id"], ok, uids=uids if ok else None,
+                                err="" if ok else f"HTTP {r.status_code}")
             return ok
     except Exception as e:  # noqa: BLE001
         log.warning("node sync error for %s: %s", url, e)
+        routing.record_sync(node["id"], False, err=type(e).__name__)
         return False
 
 
