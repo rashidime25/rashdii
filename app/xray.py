@@ -80,70 +80,6 @@ def xray_running() -> bool:
     return bool(_xray_process and _xray_process.poll() is None)
 
 
-def _xhttp_settings(settings: dict) -> dict:
-    """XHTTP transport settings: the path, which is all this panel pins.
-
-    The panel-wide mode/padding/post-size knobs were removed (they are the
-    engine's own defaults again); per-user tuning lives on the user, not here.
-    """
-    return {"path": "/xhttp"}
-
-
-def _policy(users: list, settings: dict) -> dict:
-    """The policy block: online-stats (level 0) + the plans users are pinned to.
-
-    Only levels that at least one *enabled* user actually uses are emitted, so
-    an empty panel produces the same config as before and the plans cost nothing
-    until they are handed out.
-    """
-    levels = {"0": {"statsUserUplink": True, "statsUserDownlink": True,
-                    "statsUserOnline": True}}
-    used = set()
-    for u in users:
-        if not u.get("enabled"):
-            continue
-        try:
-            used.add(int(u.get("policy_level") or 0))
-        except (TypeError, ValueError):
-            pass
-    for lvl in sorted(used):
-        plan = config.POLICY_PLANS.get(lvl)
-        if not plan:
-            continue
-        entry = {"statsUserUplink": True, "statsUserDownlink": True}
-        entry.update(plan)
-        levels[str(lvl)] = entry
-    return {
-        "levels": levels,
-        "system": {"statsInboundUplink": True, "statsInboundDownlink": True},
-    }
-
-
-def _reality_identity(users: list, settings: dict) -> tuple:
-    """(serverNames, shortIds) for the shared Reality inbound.
-
-    One Reality inbound serves everybody, so its identity is assembled from the
-    panel default and each user's own SNI/shortId. Keeping the per-user values
-    inside the shared inbound is what makes "rotate one user's SNI" or "block
-    one user" possible without disturbing anyone else.
-    """
-    snis = {config.REALITY_SNI, (settings.get("reality_sni") or "").strip()}
-    short_ids = set()
-    panel_sid = (db.get_meta("reality_sid") or "").strip()
-    if panel_sid:
-        short_ids.add(panel_sid)
-    for u in users:
-        u_sni = (u.get("reality_sni") or "").strip()
-        if u_sni:
-            snis.add(u_sni)
-        u_sid = (u.get("short_id") or "").strip()
-        if u_sid:
-            short_ids.add(u_sid)
-    names = sorted(n for n in snis if n)
-    ids = sorted(i for i in short_ids if i)
-    return (names or [config.REALITY_SNI]), (ids or [panel_sid] or [""])
-
-
 # ----------------------------------------------------------------- routing rules
 def _blocked_rules(settings: dict) -> list:
     """Build Xray routing rules for the domain-blocking feature."""
@@ -182,25 +118,10 @@ def generate_xray_config() -> dict:
 
     def mk_client(u, flow: str = ""):
         c = {"id": u["uuid"], "email": u["uid"]}
-        # A per-user flow overrides the inbound default. "" is meaningful: it
-        # means "no vision", which is what that user's links advertise, and the
-        # server must agree or those links die on connect.
-        chosen = u.get("flow")
-        if chosen in (None, "", "__inherit__"):
-            chosen = flow          # inherit the transport default
-        elif chosen == "none":
-            chosen = ""            # explicitly plain VLESS
-        if chosen:
-            c["flow"] = chosen
+        if flow:
+            c["flow"] = flow
         if u.get("password"):
             c["password"] = u["password"]
-        # policy level >0 opts the user into the special-plan knobs below.
-        try:
-            lvl = int(u.get("policy_level") or 0)
-        except (TypeError, ValueError):
-            lvl = 0
-        if lvl > 0:
-            c["level"] = lvl
         return c
 
     vless_clients = [mk_client(u) for u in users if u["enabled"] and u["protocol"] == "vless"]
@@ -279,7 +200,7 @@ def generate_xray_config() -> dict:
             "port": config.XRAY_XHTTP_PORT,
             "protocol": "vless",
             "settings": {"clients": xhttp_vless, "decryption": "none"},
-            "streamSettings": {"network": "xhttp", "xhttpSettings": _xhttp_settings(settings)},
+            "streamSettings": {"network": "xhttp", "xhttpSettings": {"path": "/xhttp"}},
             "tag": "in-vless-xhttp",
         })
     if xhttp_vmess:
@@ -288,7 +209,7 @@ def generate_xray_config() -> dict:
             "port": config.XRAY_XHTTP_PORT,
             "protocol": "vmess",
             "settings": {"clients": xhttp_vmess},
-            "streamSettings": {"network": "xhttp", "xhttpSettings": _xhttp_settings(settings)},
+            "streamSettings": {"network": "xhttp", "xhttpSettings": {"path": "/xhttp"}},
             "tag": "in-vmess-xhttp",
         })
 
@@ -497,7 +418,8 @@ def generate_xray_config() -> dict:
         # seeds the setting from config, but an admin who edits it (or a Railway
         # redeploy that changes TITAN_REALITY_SNI) would otherwise produce links
         # Reality rejects outright.
-        snis, short_ids = _reality_identity(users, settings)
+        snis = sorted({s for s in (config.REALITY_SNI,
+                                   db.get_settings().get("reality_sni") or "") if s})
         if priv:
             inbounds.append({
                 "listen": "0.0.0.0", "port": config.XRAY_TCP_VLESS_REALITY_PORT, "protocol": "vless",
@@ -506,9 +428,9 @@ def generate_xray_config() -> dict:
                     "show": False,
                     "dest": config.REALITY_DEST,
                     "xver": 0,
-                    "serverNames": snis,
+                    "serverNames": snis or [config.REALITY_SNI],
                     "privateKey": priv,
-                    "shortIds": short_ids,
+                    "shortIds": [sid],
                 }},
                 "tag": "in-vless-reality",
             })
@@ -572,9 +494,13 @@ def generate_xray_config() -> dict:
         },
         "api": {"tag": "api", "services": ["StatsService"]},
         "stats": {},
-        # statsUserOnline feeds `xray api statsonline(iplist)` — the only way
-        # to know who is really connected (state.ACTIVE never was populated).
-        "policy": _policy(users, settings),
+        "policy": {
+            # statsUserOnline feeds `xray api statsonline(iplist)` — the only way
+            # to know who is really connected (state.ACTIVE never was populated).
+            "levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True,
+                             "statsUserOnline": True}},
+            "system": {"statsInboundUplink": True, "statsInboundDownlink": True},
+        },
         "inbounds": inbounds,
         "outbounds": outbounds,
         "routing": {"rules": routing_rules},
