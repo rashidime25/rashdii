@@ -45,8 +45,9 @@ def test_builder_assets_are_served(admin):
     r = admin.get("/static/js/titan-config-builder.js")
     assert r.status_code == 200
     js = r.text
-    for endpoint in ("/api/recipes", "/api/settings", "/client-config", "/link-test"):
+    for endpoint in ("/api/recipes", "/client-config", "/link-test"):
         assert endpoint in js, f"the UI should talk to {endpoint}"
+    assert "/api/settings" not in js, "the settings form was reverted; nothing may post to it"
     assert "mu_recipe" in js and "mu_flow" in js
 
 
@@ -90,19 +91,18 @@ def test_new_ui_sticks_to_the_existing_theme():
     assert not unknown, f"classes not defined in the panel theme: {unknown}"
 
 
-def test_tuning_form_covers_every_engine_key():
-    """A knob the backend accepts but the UI never shows is a half-shipped feature."""
+def test_the_engine_tuning_form_is_really_gone():
+    """The panel settings form was reverted, so the UI must not offer the knobs.
+
+    A field that posts a key the API now ignores is the worst kind of UI: it
+    looks like it worked, and nothing happens.
+    """
     sysm = __import__("app.config", fromlist=["app"])
-    import inspect
-    main = __import__("app.main", fromlist=["app"])
-    _ = inspect
-    keys = ("sock_tfo", "sock_nodelay", "sock_keepalive", "sock_user_timeout",
-            "sock_congestion", "xhttp_mode", "xhttp_padding", "xhttp_max_post",
-            "xhttp_xmux", "reality_server_names", "link_test_target")
     js = _read("static/js/titan-config-builder.js")
-    for key in keys:
-        assert key in js, f"{key} is accepted by the API but not editable in the UI"
-        assert key in sysm.DEFAULT_SETTINGS, f"{key} is missing from DEFAULT_SETTINGS"
+    for key in sysm.RETIRED_SETTINGS:
+        assert key not in js, f"{key} is still editable in the UI but the API drops it"
+        assert key not in sysm.DEFAULT_SETTINGS
+    assert "cb-tuning" not in js and "cb-save" not in js
 
 
 def test_dashboard_html_tags_balanced():

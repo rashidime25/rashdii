@@ -103,6 +103,12 @@ async def lifespan(app: FastAPI):
             reality.ensure_reality_keys()
         except Exception:  # noqa: BLE001
             pass
+    try:
+        gone = db.purge_retired_settings()
+        if gone:
+            log.info("startup: dropped retired settings %s", ", ".join(gone))
+    except Exception:  # noqa: BLE001
+        pass
     _phase("reality keys")
     try:
         xray.write_xray_config()
@@ -848,62 +854,10 @@ async def api_set_settings(request: Request, _: str = Depends(_require_auth)):
             v = str(v or "").strip()[:256]
             if v and any(c in v for c in ' <>"\''):
                 continue
-        if k == "reality_server_names":
-            updates[k] = _clean_extra_snis(v)
-            continue
-        if k in ("sock_tfo", "sock_nodelay", "sock_keepalive", "xhttp_xmux"):
-            updates[k] = (v if isinstance(v, bool)
-                          else str(v).strip().lower() in ("1", "true", "on", "yes"))
-            continue
-        if k == "sock_user_timeout":
-            try:
-                tv = int(str(v).strip() or 0)
-            except (ValueError, TypeError):
-                continue
-            if not 0 <= tv <= 600000:
-                continue
-            updates[k] = tv
-            continue
-        if k == "sock_congestion":
-            cv = str(v or "").strip().lower()
-            if cv not in config.VALID_SOCK_CONGESTION:
-                continue
-            updates[k] = cv
-            continue
-        if k == "xhttp_mode":
-            mv = str(v or "").strip().lower()
-            if mv not in config.VALID_XHTTP_MODES:
-                continue
-            updates[k] = mv
-            continue
-        if k == "xhttp_padding":
-            pv = str(v or "").strip()
-            if pv and not re.fullmatch(r"\d{1,5}(-\d{1,5})?", pv):
-                continue
-            updates[k] = pv[:32]
-            continue
-        if k == "xhttp_max_post":
-            try:
-                mv2 = int(str(v).strip() or 0)
-            except (ValueError, TypeError):
-                continue
-            if not 0 <= mv2 <= 50_000_000:
-                continue
-            updates[k] = mv2
-            continue
-        if k == "link_test_target":
-            tv2 = str(v or "").strip()[:256]
-            if tv2 and not re.match(r"^https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$", tv2):
-                continue
-            updates[k] = tv2
-            continue
         updates[k] = v
     db.set_settings(updates)
     # routing-affecting flags require an Xray reload
-    engine_keys = {"block_ads", "block_iran_sites", "restrict_ips", "reality_server_names",
-                   "sock_tfo", "sock_nodelay", "sock_keepalive", "sock_user_timeout",
-                   "sock_congestion", "xhttp_mode", "xhttp_padding", "xhttp_max_post",
-                   "xhttp_xmux", "reality_sni"}
+    engine_keys = {"block_ads", "block_iran_sites", "restrict_ips", "reality_sni"}
     if any(k in updates for k in engine_keys):
         try:
             xray.write_xray_config()
@@ -947,17 +901,6 @@ def _clean_sni(value) -> str:
     if not v or not re.fullmatch(r"[A-Za-z0-9._-]+", v):
         return ""
     return v
-
-
-def _clean_extra_snis(value) -> str:
-    """Comma-separated extra Reality server names (order kept, deduped)."""
-    out, seen = [], set()
-    for part in str(value or "").replace(";", ",").split(","):
-        name = _clean_sni(part)
-        if name and name not in seen:
-            seen.add(name)
-            out.append(name)
-    return ",".join(out[:12])
 
 
 def _clean_flow(value) -> str:
@@ -1465,8 +1408,6 @@ async def api_recipes(_: str = Depends(_require_auth)):
         "plans": [{"level": lvl, "label": lbl}
                   for lvl, lbl in sorted(config.POLICY_PLAN_LABELS.items())],
         "flows": [f for f in ("", "none", "xtls-rprx-vision", "xtls-rprx-vision-udp443")],
-        "xhttp_modes": sorted(config.VALID_XHTTP_MODES),
-        "sock_congestion": sorted(c for c in config.VALID_SOCK_CONGESTION if c),
     }
 
 

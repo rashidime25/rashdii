@@ -135,8 +135,6 @@ def build_vless_link(host: str, port: int, user: dict, settings: dict) -> str:
         return f"vless://{uuid}@{host}:{port}?encryption=none&security={sec}&{_grpc_params(_grpc_service(user), sni, fp)}#{name}"
     if transport in ("ws", "xhttp", "httpupgrade"):
         params = _host_params(host, _path_for("vless", transport), sni, fp, alpn, transport, settings)
-        if transport == "xhttp":
-            params += f"&mode={quote(str(settings.get('xhttp_mode') or 'auto'), safe='')}"
         return f"vless://{uuid}@{host}:{port}?encryption=none&security={sec}&{params}#{name}"
     if transport == "tcp":
         # raw TCP: TLS terminated by Xray (or plain). sni/fp/alpn still apply.
@@ -346,27 +344,13 @@ def build_client_config(user: dict, host: str, port: int, settings: dict,
     if transport == "ws":
         ss["wsSettings"] = {"path": _path_for("vless", "ws"), "host": host}
     elif transport == "xhttp":
-        ss["xhttpSettings"] = {"path": "/xhttp", "mode": str(settings.get("xhttp_mode") or "auto"),
-                               "host": host}
-        # xmux is the client-side half of the connection-reuse trick: it is what
-        # makes a page load feel instant instead of opening a stream per request.
-        if settings.get("xhttp_xmux"):
-            ss["xhttpSettings"]["xmux"] = {"maxConcurrency": "16-32", "hKeepAlivePeriod": 30}
+        ss["xhttpSettings"] = {"path": "/xhttp", "host": host}
     elif transport == "httpupgrade":
         ss["httpupgradeSettings"] = {"path": "/hup", "host": host}
     elif transport == "grpc":
         ss["grpcSettings"] = {"serviceName": "titan"}
 
-    sock = {}
-    if settings.get("sock_tfo"):
-        sock["tcpFastOpen"] = True
-    if settings.get("sock_nodelay"):
-        sock["tcpNoDelay"] = True
-    if settings.get("sock_keepalive"):
-        sock["tcpKeepAliveIdle"] = 30
-        sock["tcpKeepAliveInterval"] = 10
-    sock["domainStrategy"] = "UseIPv4"
-    ss["sockopt"] = sock
+    ss["sockopt"] = {"domainStrategy": "UseIPv4"}
 
     outbound: dict = {"protocol": user.get("protocol", "vless"), "streamSettings": ss,
                       "tag": "proxy"}

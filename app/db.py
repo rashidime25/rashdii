@@ -267,12 +267,33 @@ def set_admin(username: str, password_hash: str, salt: str) -> None:
         c.commit()
 
 
+def purge_retired_settings() -> list:
+    """Delete the settings rows this build no longer supports. Returns the keys.
+
+    Not a cosmetic cleanup: get_settings() overlays every stored row on the
+    defaults, so an orphan row would keep travelling to the dashboard (and any
+    client of the API) as if it still meant something.
+    """
+    with _lock:
+        c = _connect()
+        marks = ",".join("?" for _ in config.RETIRED_SETTINGS)
+        rows = c.execute(
+            f"SELECT key FROM settings WHERE key IN ({marks})", config.RETIRED_SETTINGS
+        ).fetchall()
+        if rows:
+            c.execute(f"DELETE FROM settings WHERE key IN ({marks})", config.RETIRED_SETTINGS)
+            c.commit()
+    return sorted(row["key"] for row in rows)
+
+
 def get_settings() -> dict:
     with _lock:
         c = _connect()
         rows = c.execute("SELECT key, value FROM settings").fetchall()
     settings = dict(config.DEFAULT_SETTINGS)
     for row in rows:
+        if row["key"] not in settings:
+            continue  # a retired key must not travel to the UI (see purge_retired_settings)
         try:
             settings[row["key"]] = json.loads(row["value"])
         except (json.JSONDecodeError, TypeError):
