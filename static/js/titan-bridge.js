@@ -22,6 +22,9 @@
     sync:'<path d="M21 12a9 9 0 0 1-15.3 6.4M3 12a9 9 0 0 1 15.3-6.4"/><path d="M21 4v6h-6M3 20v-6h6"/>',
     power:'<path d="M18.4 6.6a9 9 0 1 1-12.8 0"/><path d="M12 2v10"/>',
     download:'<path d="M12 3v12m0 0 4.5-4.5M12 15l-4.5-4.5"/><path d="M4 19h16"/>',
+    sliders:'<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h9M17 18h3"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="15" cy="18" r="2"/>',
+    checks:'<path d="M3 7.5 6 10.5l4.5-5M12 8h9M3 17.5 6 20.5l4.5-5M12 18h9"/>',
+    xcircle:'<circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>',
   };
   function icon(name, size=17, width=1.8){
     const body = ICONS[name] || ICONS.sparkle;
@@ -254,7 +257,7 @@
     overlay.addEventListener('click',e=>{ if(e.target===overlay) close(); });
     $('#titanModalSave',overlay).onclick=async()=>{
       const btn=$('#titanModalSave',overlay); btn.disabled=true; const old=btn.textContent; btn.textContent='...';
-      try{ await onSave(overlay); close(); toast('انجام شد'); loadOverview(); }
+      try{ const msg = await onSave(overlay); close(); toast(msg || 'انجام شد'); loadOverview(); }
       catch(e){ toast(e.message); }
       finally{ btn.disabled=false; btn.textContent=old; }
     };
@@ -267,7 +270,20 @@
     const nodes = nodesRes.nodes||[];
     const isEdit = !!existing;
     const u = existing || {};
-    const nodeOpts = '<option value="0">🌐 خودکار (نزدیک‌ترین)</option>' + nodes.map(n=>`<option value="${n.id}" ${String(u.node_id||0)===String(n.id)?'selected':''}>${esc(n.flag||flagFor(n.country_code)||'🌐')} ${esc(n.name)}</option>`).join('');
+    const nodeOpts = '<option value="0">🌐 خودکار (نزدیک‌ترین)</option>' + nodes.map(n=>`<option value="${n.id}" ${String(u.node_id||0)===String(n.id)?'selected':''}>${esc(n.flag||flagFor(n.country_code)||'🌐')} ${esc(n.name)}${(n.sync&&n.sync.ok===false)?' ⚠':''}</option>`).join('');
+    const nodeInfo={}; nodes.forEach(n=>{ nodeInfo[String(n.id)]={name:n.name, local:!!n.is_local, enabled:n.enabled!==false,
+      online:!!(n.status&&n.status.online), cred:!!(n.sync&&n.sync.has_credential), ok:(n.sync&&n.sync.ok)===true, err:(n.sync&&n.sync.error)||''}; });
+    // Say what picking this server means *before* saving: a node that cannot take
+    // the user is exactly how a config ends up on the main domain by surprise.
+    const nodeHint=(id)=>{
+      const i=nodeInfo[String(id)];
+      if(!i || String(id)==='0') return {text:'خودکار = نزدیک‌ترین نودِ آنلاین و همگام‌شده.', cls:''};
+      if(!i.enabled) return {text:'این نود در حالت نگهداری است — کانفیگ از پنل سرو می‌شود.', cls:'warn'};
+      const reason = !i.cred ? 'نود اعتبارنامه‌اش را نگرفته' : (i.ok ? '' : (i.err?('آخرین همگام‌سازی موفق نبود: '+i.err):'هنوز هیچ همگام‌سازی موفقی نداشته'));
+      if(reason) return {text:'⚠ '+i.name+': '+reason+' — تا آماده شدنش، کانفیگ از پنل سرو می‌شود (تایم‌اوت نمی‌کند).', cls:'warn'};
+      if(!i.online) return {text:'⚠ '+i.name+' الان آنلاین نیست، ولی کاربر روی آن ثبت می‌شود.', cls:'warn'};
+      return {text:'✓ روی '+i.name+' سرو می‌شود ('+(i.online?'آنلاین':'نامعلوم')+').', cls:'ok'};
+    };
     const protocols=['vless','vmess','trojan','shadowsocks','hysteria2','wireguard'];
     const transports=['ws','xhttp','grpc','tcp','httpupgrade'];
     const fingerprints=['chrome','firefox','safari','ios','android','edge','random','randomized'];
@@ -288,6 +304,7 @@
           <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">یادداشت<input id="mu_note" value="${esc(u.note||'')}" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"></label>
         </div>
         <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">سرور<select id="mu_node" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">${nodeOpts}</select></label>
+        <div id="mu_nodeHint" class="node-hint"></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
           <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">پروتکل<select id="mu_protocol" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">${protocols.map(p=>`<option value="${p}" ${ (u.protocol||'vless')===p?'selected':''}>${p.toUpperCase()}</option>`).join('')}</select></label>
           <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">انتقال<select id="mu_transport" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">${transports.map(t=>`<option value="${t}" ${(u.transport||settings.default_transport||'ws')===t?'selected':''}>${t.toUpperCase()}</option>`).join('')}</select></label>
@@ -327,12 +344,16 @@
         avatar: $('#mu_avatar',overlay).value,
         client_nonce: Math.random().toString(36).slice(2)+Date.now().toString(36)
       };
-      if(isEdit){
-        await apiJson('/api/users/'+u.uid,{method:'PATCH',body});
-      } else {
-        await apiJson('/api/users',{method:'POST',body});
-      }
+      const res = isEdit
+        ? await apiJson('/api/users/'+u.uid,{method:'PATCH',body})
+        : await apiJson('/api/users',{method:'POST',body});
       setTimeout(()=>{ const ev=new Event('titan:refresh'); document.dispatchEvent(ev); }, 100);
+      // Tell the admin where the config actually landed — the panel's own link is
+      // a valid answer, but it must never be a silent surprise.
+      const ns=res.node_sync||{};
+      if(ns.node_id && ns.ok) return 'ذخیره شد — کاربر روی نود '+ns.node_name+' پوش شد ✓';
+      if(ns.node_id && !ns.ok) return 'ذخیره شد، ولی نود قبول نکرد ('+(ns.error||'')+') — فعلاً از پنل سرو می‌شود';
+      return 'ذخیره شد';
     });
     // wire ui immediately after modal creation (not only on save)
     setTimeout(()=>{
@@ -352,6 +373,102 @@
       };
       if(protoSel) protoSel.addEventListener('change',updateDeps);
       updateDeps();
+      const nodeSel=$('#mu_node',overlay), hint=$('#mu_nodeHint',overlay);
+      const paint=()=>{ if(!nodeSel||!hint) return; const h=nodeHint(nodeSel.value); hint.textContent=h.text; hint.className='node-hint '+(h.cls||''); };
+      if(nodeSel) nodeSel.addEventListener('change',paint);
+      paint();
+    }, 20);
+  }
+
+  // A node cannot accept users until it knows a credential. The dashboard used to
+  // show the token in a 2-second toast; this shows the exact variables to paste
+  // into the node service, with the copy button, and says what happens meanwhile.
+  function openNodeSetupModal(res){
+    const setup=res.setup||{}; const sync=res.sync_now||{};
+    const lines=(setup.lines||[]).map(l=>{
+      const i=l.indexOf('=');
+      return `<div class="env-line"><span class="env-k">${esc(l.slice(0,i))}</span><span class="env-v" dir="ltr">${esc(l.slice(i+1))}</span></div>`;
+    }).join('');
+    createModal('راه‌اندازی این نود', `
+      <div style="display:grid;gap:14px">
+        <div class="nl-note ${sync.ok?'':'bad'}" style="margin:0">
+          ${sync.ok ? 'نود جواب داد و کاربرانش را گرفت ✓'
+                    : 'این نود هنوز جواب نداده'+(sync.error?' ('+esc(sync.error)+')':'')+' — تا آن موقع، کانفیگ‌های این نود روی خودِ پنل سرو می‌شوند (تایم‌اوت نمی‌کنند).'}
+        </div>
+        <p style="margin:0;font-size:11px;color:#a8a6bf;line-height:2">
+          روی سرویسِ همین نود، این متغیرها را ست کن و یک‌بار دیپلوی کن؛ بعد از آن، کاربرهایی که به این نود بدهی روی دامنهٔ خودش سرو می‌شوند.
+        </p>
+        <div class="env-list">${lines}</div>
+        <p style="margin:0;font-size:10.5px;color:#8586a8;line-height:2">${esc(setup.note||'')}</p>
+      </div>`, async ()=>{ /* nothing to save: it is a recipe */ });
+    setTimeout(()=>{
+      const overlay=$('#titanModal'); if(!overlay) return;
+      const list=$('.env-list',overlay);
+      if(list) list.addEventListener('click', async(e)=>{
+        const line=e.target.closest('.env-line'); if(!line) return;
+        const text=line.querySelector('.env-k').textContent+'='+line.querySelector('.env-v').textContent;
+        try{ await navigator.clipboard.writeText(text); toast('کپی شد'); }catch(err){ toast(text); }
+      });
+      const save=$('#titanModalSave',overlay);
+      if(save){ save.textContent='فهمیدم'; save.onclick=()=>overlay.remove(); }
+    }, 20);
+  }
+
+  // QR + on/off live in both the users and the configs tables; one helper keeps
+  // the two behaviours identical (and the buttons are icon-only, so the label
+  // travels in the tooltip).
+  function wireRowExtras(tbody, refresh){
+    tbody.querySelectorAll('[data-act="qr"]').forEach(b=> b.addEventListener('click', ()=>{
+      window.open('/api/users/'+b.dataset.uid+'/qr','_blank');
+    }));
+    tbody.querySelectorAll('[data-act="power"]').forEach(b=> b.addEventListener('click', async()=>{
+      const uid=b.dataset.uid; const on=b.dataset.on==='1';
+      b.disabled=true;
+      try{
+        await apiJson('/api/users/'+uid,{method:'PATCH',body:{enabled:!on}});
+        toast(on?'کانفیگ خاموش شد':'کانفیگ روشن شد');
+        refresh(); loadOverview();
+      }catch(e){ toast(e.message); } finally{ b.disabled=false; }
+    }));
+  }
+
+  // Which configs this user's subscription link carries. The server lists every
+  // config it really serves for the user (a VLESS user answers on WS, XHTTP,
+  // HTTPUpgrade and gRPC), and the picked set is stored per user.
+  async function openSubConfigModal(uid, refresh){
+    const info = await apiJson('/api/users/'+uid+'/sub-configs');
+    const configs = info.configs||[];
+    if(!configs.length){ toast('کانفیگی برای این کاربر وجود ندارد'); return; }
+    const rows = configs.map((c,i)=>`
+      <label class="cfg-pick" data-key="${esc(c.key)}">
+        <input type="checkbox" ${c.included?'checked':''} data-key="${esc(c.key)}">
+        <span class="cfg-pick-body">
+          <span class="cfg-pick-name">${esc(c.protocol.toUpperCase())} · ${esc(c.key.toUpperCase())}</span>
+          <span class="cfg-pick-host" dir="ltr">${esc(c.host)}:${esc(String(c.port))} · ${esc(c.transport)}/${esc(c.security||'none')}${c.target==='node'?' · node':' · panel'}</span>
+        </span>
+      </label>`).join('');
+    createModal('کانفیگ‌های لینک اشتراک', `
+      <div style="display:grid;gap:12px">
+        <p style="margin:0;font-size:11px;color:#a8a6bf;line-height:2">
+          هر کدام را تیک بزنی، داخل همین لینک اشتراک می‌آید. اگر همه تیک بخورند یعنی «همه» (کانفیگ‌هایی که بعداً به این کاربر اضافه شوند هم خودکار می‌آیند).
+        </p>
+        <div class="cfg-pick-list">${rows}</div>
+        <div style="display:flex;gap:10px;align-items:center;font-size:11px;color:#a8a6bf">
+          ${icoBtn({"type":"button","id":"cfgPickAll"},"checks","انتخاب همه")}
+          ${icoBtn({"type":"button","id":"cfgPickNone"},"xcircle","هیچ‌کدام")}
+          <span style="direction:ltr" dir="ltr">${esc(info.sub_url||'')}</span>
+        </div>
+      </div>`, async (overlay)=>{
+        const picked=Array.from(overlay.querySelectorAll('.cfg-pick input:checked')).map(c=>c.dataset.key);
+        await apiJson('/api/users/'+uid+'/sub-configs',{method:'PATCH',body:{transports:picked}});
+        if(refresh) refresh();
+      });
+    setTimeout(()=>{
+      const overlay=$('#titanModal'); if(!overlay) return;
+      const all=$('#cfgPickAll',overlay), none=$('#cfgPickNone',overlay);
+      const boxes=()=>Array.from(overlay.querySelectorAll('.cfg-pick input'));
+      if(all) all.onclick=()=>boxes().forEach(b=>{ b.checked=true; });
+      if(none) none.onclick=()=>boxes().forEach(b=>{ b.checked=false; });
     }, 20);
   }
 
@@ -381,12 +498,18 @@
         flag: $('#mn_flag',overlay).value.trim()
       };
       if(!body.name) throw new Error('نام الزامی است');
-      if(isEdit) await apiJson('/api/nodes/'+n.id,{method:'PATCH',body});
-      else {
+      let message='انجام شد';
+      if(isEdit){
+        const res=await apiJson('/api/nodes/'+n.id,{method:'PATCH',body});
+        const st=(res.node&&res.node.sync)||{};
+        if(st.ok===false) message='نود جواب نداد ('+(st.error||'')+') — کانفیگ‌ها موقتاً از پنل سرو می‌شوند';
+      } else {
         const res=await apiJson('/api/nodes',{method:'POST',body});
-        if(res.token) toast('توکن نود: '+res.token);
+        if(res.sync_now && res.sync_now.ok===false) openNodeSetupModal(res);
+        else message='نود اضافه شد و کاربرانش را گرفت ✓';
       }
       setTimeout(()=> document.dispatchEvent(new Event('titan:refresh')), 100);
+      return message;
     });
     setTimeout(()=>{
       const overlay=$('#titanModal'); if(!overlay) return;
@@ -433,11 +556,13 @@
               const st=u.status||{}; const used=fmtBytes(st.used||0);
               const days=u.expire_at? Math.max(0,Math.ceil((u.expire_at - Date.now()/1000)/86400))+' روز':'هرگز';
               const label=st.expired?'منقضی':(!u.enabled?'غیرفعال':'فعال'); const cls=st.expired?'warn':(!u.enabled?'off':'');
-              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td class="muted">#${esc(u.uid.slice(0,6))}</td><td>${esc(used)}</td><td>${esc(days)}</td><td><span class="pill ${cls}">${esc(label)}</span></td><td><div class="row-actions">${icoBtn({"data-uid":u.uid,"data-act":"edit"},"edit","ویرایش کاربر","gold")}${icoBtn({"data-uid":u.uid,"data-act":"detail"},"link","کپی لینک اتصال","violet")}${icoBtn({"data-uid":u.uid,"data-act":"del"},"trash","حذف","danger")}</div></td></tr>`;
+              const on = !!u.enabled && !(st.expired);
+              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td class="muted">#${esc(u.uid.slice(0,6))}</td><td>${esc(used)}</td><td>${esc(days)}</td><td><span class="pill ${cls}">${esc(label)}</span></td><td><div class="row-actions">${icoBtn({"data-uid":u.uid,"data-act":"edit"},"edit","ویرایش کاربر","gold")}${icoBtn({"data-uid":u.uid,"data-act":"detail"},"link","کپی لینک اتصال","violet")}${icoBtn({"data-uid":u.uid,"data-act":"qr"},"qr","QR code","")}${icoBtn({"data-uid":u.uid,"data-act":"power","data-on":on?1:0},"power",on?"خاموش کردن":"روشن کردن",on?"":"ok")}${icoBtn({"data-uid":u.uid,"data-act":"del"},"trash","حذف","danger")}</div></td></tr>`;
             }).join('') : '<tr><td colspan="6" style="text-align:center;color:#8586a8">کاربری وجود ندارد</td></tr>';
             tbody.querySelectorAll('[data-act="del"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; if(!confirm('حذف کاربر؟')) return; try{ await apiJson('/api/users/'+uid,{method:'DELETE'}); toast('حذف شد'); refreshUsers(); loadOverview(); }catch(e){toast(e.message);} }));
             tbody.querySelectorAll('[data-act="detail"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const d=await apiJson('/api/users/'+uid+'/links'); await navigator.clipboard.writeText(d.main_link||d.links[0]); toast('لینک کپی شد'); }catch(e){toast(e.message);} }));
             tbody.querySelectorAll('[data-act="edit"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const u=await apiJson('/api/users/'+uid); await openUserModal(u); }catch(e){toast(e.message);} }));
+            wireRowExtras(tbody, refreshUsers);
           }
           const cnt=usersSection.querySelector('.data-card .muted'); if(cnt) cnt.textContent=users.length+' مورد';
         }catch(e){ console.error(e); }
@@ -471,11 +596,14 @@
             tbody.innerHTML=users.length? users.map(u=>{
               const n=nodeMap[u.node_id||1]; const loc=n?((n.city&&n.city!=='—')?n.city:n.name):'—'; const flag=n?(n.flag||flagFor(n.country_code)||'🌐'):'🌐';
               const st=u.status||{}; const label=st.expired?'منقضی':(!u.enabled?'غیرفعال':'فعال'); const cls=st.expired?'warn':(!u.enabled?'off':'');
-              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td>${esc((u.protocol||'').toUpperCase())}</td><td>${esc(flag)} ${esc(loc)}</td><td>${u.expire_at? fmtDate(u.expire_at):'هرگز'}</td><td><span class="pill ${cls}">${esc(label)}</span></td><td><div class="row-actions">${icoBtn({"data-uid":u.uid,"data-act":"edit"},"edit","ویرایش کانفیگ","gold")}${icoBtn({"data-uid":u.uid,"data-act":"links"},"link","کپی لینک اتصال","violet")}${icoBtn({"data-uid":u.uid,"data-act":"del"},"trash","حذف","danger")}</div></td></tr>`;
+              const on = !!u.enabled && !(st.expired);
+              const port = (u.main_link||'').split('@')[1] ? (u.main_link||'').split('@')[1].split('/')[0] : '—';
+              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td>${esc((u.protocol||'').toUpperCase())} · ${esc((u.transport||'').toUpperCase())}</td><td>${esc(flag)} ${esc(loc)}</td><td dir="ltr" class="muted">${esc(port)}</td><td><span class="pill ${cls}">${esc(label)}</span></td><td><div class="row-actions">${icoBtn({"data-uid":u.uid,"data-act":"edit"},"edit","ویرایش کانفیگ","gold")}${icoBtn({"data-uid":u.uid,"data-act":"links"},"link","کپی لینک اتصال","violet")}${icoBtn({"data-uid":u.uid,"data-act":"qr"},"qr","QR code","")}${icoBtn({"data-uid":u.uid,"data-act":"power","data-on":on?1:0},"power",on?"خاموش کردن":"روشن کردن",on?"":"ok")}${icoBtn({"data-uid":u.uid,"data-act":"del"},"trash","حذف","danger")}</div></td></tr>`;
             }).join('') : '<tr><td colspan="6" style="text-align:center;color:#8586a8">کانفیگی وجود ندارد</td></tr>';
             tbody.querySelectorAll('[data-act="del"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; if(!confirm('حذف کانفیگ؟')) return; try{ await apiJson('/api/users/'+uid,{method:'DELETE'}); toast('حذف شد'); refreshConfigs(); loadOverview(); }catch(e){toast(e.message);} }));
             tbody.querySelectorAll('[data-act="links"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const d=await apiJson('/api/users/'+uid+'/links'); await navigator.clipboard.writeText(d.main_link||d.links[0]); toast('لینک کپی شد'); }catch(e){toast(e.message);} }));
             tbody.querySelectorAll('[data-act="edit"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const u=await apiJson('/api/users/'+uid); await openUserModal(u); }catch(e){toast(e.message);} }));
+            wireRowExtras(tbody, refreshConfigs);
           }
         }catch(e){ console.error(e); }
       }
@@ -535,7 +663,8 @@
               if(sync.ok===true){
                 const serv=(sync.serving||[]).length;
                 const exp=sync.expected!=null?sync.expected:serv;
-                caps.push(`<span class="nl-cap ok"><span class="dotm"></span>sync ${serv}/${exp} ✓</span>`);
+                const cred=sync.credential?(' · '+(sync.credential==='shared'?'shared secret':'token')):'';
+                caps.push(`<span class="nl-cap ok"><span class="dotm"></span>sync ${serv}/${exp} ✓${cred}</span>`);
               } else if(sync.ok===false){
                 caps.push(`<span class="nl-cap bad"><span class="dotm"></span>sync ${esc(sync.error||'failed')}</span>`);
               }
@@ -552,7 +681,7 @@
             const loc=[city||n.name, cc].filter(Boolean).join(' · ');
             const sync=n.sync||{}; const stale=(sync.ok===true && sync.at && (Date.now()/1000 - sync.at)>900);
             const note = !on ? `آخرین تماس: ${seen(n.last_seen)}${st.reason?' · '+esc(st.reason):''}`
-                        : (sync.ok===false ? `آخرین همگام‌سازی ناموفق بود (${esc(sync.error||'error')}) — کاربران این نود از پنل سرو می‌شوند.`
+                        : (sync.ok===false ? `آخرین همگام‌سازی ناموفق بود (${esc(sync.error||'error')}) — کاربران این نود از پنل سرو می‌شوند؛ توکن نود را روی خودِ نود ست کن (دکمهٔ ویرایش).`
                         : (stale ? `همگام‌سازی قدیمی است (${seen(sync.at)}) — یک بار همگام‌سازی فوری بزن.`
                         : (sync.ok===true ? '' : 'وضعیت همگام‌سازی هنوز اندازه‌گیری نشده است.')));
             return `<article class="node-lux ${on?'':'offline'}${n.is_local?' local':''}" data-node="${n.id}">
@@ -634,11 +763,13 @@
             tbody.innerHTML=users.length? users.map(u=>{
               const st=u.status||{}; const label=st.expired?'منقضی':(!u.enabled?'غیرفعال':'فعال'); const cls=st.expired?'warn':(!u.enabled?'off':'');
               const exp=u.expire_at? new Date(u.expire_at*1000).toLocaleDateString('fa-IR') : 'هرگز';
-              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td><span class="pill ${cls}">${esc(label)}</span></td><td>${esc(exp)}</td><td>1</td><td>${esc(fmtBytes(st.used||0))}</td><td><div class="row-actions">${icoBtn({"data-uid":u.uid,"data-act":"copy"},"copy","کپی لینک اشتراک","violet")}${icoBtn({"data-uid":u.uid,"data-act":"qr"},"qr","تصویر QR","gold")}${icoBtn({"data-uid":u.uid,"data-act":"view"},"eye","کپی لینک اتصال","ok")}</div></td></tr>`;
+              const picked=(u.sub_transports||[]).length;
+              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td><span class="pill ${cls}">${esc(label)}</span></td><td>${esc(exp)}</td><td><span class="sub-count" data-uid="${esc(u.uid)}">${picked?picked:'همه'}</span></td><td>${esc(fmtBytes(st.used||0))}</td><td><div class="row-actions">${icoBtn({"data-uid":u.uid,"data-act":"configs"},"sliders","انتخاب کانفیگ‌های این اشتراک","gold")}${icoBtn({"data-uid":u.uid,"data-act":"copy"},"copy","کپی لینک اشتراک","violet")}${icoBtn({"data-uid":u.uid,"data-act":"qr"},"qr","تصویر QR","")}${icoBtn({"data-uid":u.uid,"data-act":"view"},"eye","کپی لینک اتصال","ok")}</div></td></tr>`;
             }).join('') : '<tr><td colspan="6" style="text-align:center;color:#8586a8">اشتراکی وجود ندارد</td></tr>';
             tbody.querySelectorAll('[data-act="copy"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const d=await apiJson('/api/users/'+uid+'/links'); await navigator.clipboard.writeText(d.sub_url); toast('اشتراک کپی شد'); }catch(e){toast(e.message);} }));
             tbody.querySelectorAll('[data-act="qr"]').forEach(b=> b.addEventListener('click', ()=>{ const uid=b.dataset.uid; window.open('/api/users/'+uid+'/qr','_blank'); }));
             tbody.querySelectorAll('[data-act="view"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const d=await apiJson('/api/users/'+uid+'/links'); await navigator.clipboard.writeText(d.main_link||d.links[0]); toast('لینک کپی شد'); }catch(e){toast(e.message);} }));
+            tbody.querySelectorAll('[data-act="configs"]').forEach(b=> b.addEventListener('click', async()=>{ try{ await openSubConfigModal(b.dataset.uid, refreshSubs); }catch(e){toast(e.message);} }));
           }
         }catch(e){ console.error(e); }
       }

@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS users (
     max_requests    INTEGER NOT NULL DEFAULT 0,
     avatar          TEXT NOT NULL DEFAULT '',
     ss_method       TEXT NOT NULL DEFAULT '2022-blake3-aes-128-gcm',
+    sub_transports  TEXT NOT NULL DEFAULT '',
     wg_ip           TEXT NOT NULL DEFAULT '',
     wg_priv         TEXT NOT NULL DEFAULT '',
     wg_pub          TEXT NOT NULL DEFAULT '',
@@ -149,6 +150,12 @@ def _ensure_bootstrap():
         c.commit()
     if "wg_pub" not in cols:
         c.execute("ALTER TABLE users ADD COLUMN wg_pub TEXT NOT NULL DEFAULT ''")
+        c.commit()
+    if "sub_transports" not in cols:
+        # Which of the configs the server really runs appear in the user's
+        # subscription link. Empty = all of them (the behaviour before the
+        # column existed), so no existing subscription changes on upgrade.
+        c.execute("ALTER TABLE users ADD COLUMN sub_transports TEXT NOT NULL DEFAULT ''")
         c.commit()
 
     # migration: nodes.token (per-node credential issued by the main panel)
@@ -307,6 +314,7 @@ def create_user(data: dict) -> dict:
             "spider_x", "max_devices", "first_device_uid", "allowed_ips",
             "quota_bytes", "expire_at", "created_at", "max_requests", "node_id",
             "avatar", "ss_method", "wg_ip", "wg_priv", "wg_pub",
+            "sub_transports",
         ]
         now = time.time()
         values = {
@@ -333,6 +341,7 @@ def create_user(data: dict) -> dict:
             "node_id": coerce_node_id(data.get("node_id")),
             "avatar": data.get("avatar", "") or "",
             "ss_method": data.get("ss_method", "2022-blake3-aes-128-gcm"),
+            "sub_transports": ",".join(data.get("sub_transports") or []),
             "wg_ip": data.get("wg_ip", "") or "",
             "wg_priv": data.get("wg_priv", "") or "",
             "wg_pub": data.get("wg_pub", "") or "",
@@ -356,6 +365,7 @@ def update_user(uid: str, fields: dict) -> dict | None:
         # allowed_ips was missing from this allowlist, so PATCH silently
         # dropped it (the handler validated it, the UPDATE never wrote it).
         "allowed_ips",
+        "sub_transports",
     }
     with _lock:
         c = _connect()
@@ -367,6 +377,8 @@ def update_user(uid: str, fields: dict) -> dict | None:
                 v = 1 if v else 0
             if k == "allowed_ips":
                 v = json.dumps(v, ensure_ascii=False)
+            if k == "sub_transports" and isinstance(v, (list, tuple, set)):
+                v = ",".join(str(x) for x in v)
             sets.append(f"{k}=?")
             vals.append(v)
         if sets:

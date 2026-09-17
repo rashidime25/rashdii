@@ -435,6 +435,119 @@ def _links_for(u: dict, request: Request | None) -> dict:
     return build_links(host, port, shown, settings, server_pub=server_pub)
 
 
+#: Which transports each protocol is really served on. The Xray config puts
+#: every VLESS user into the WS, XHTTP, HTTPUpgrade and gRPC inbounds alike (and
+#: every VMess user into its own four), so *one* user genuinely answers on four
+#: configs - which is what makes a per-subscription selection meaningful instead
+#: of decorative. The stored transport always comes first: that is the row's main
+#: config, the one the copy button hands out.
+_SUB_TRANSPORT_ORDER = {
+    "vless": ("ws", "xhttp", "httpupgrade", "grpc", "tcp"),
+    "vmess": ("ws", "xhttp", "httpupgrade", "grpc", "tcp"),
+    "trojan": ("ws", "tcp"),
+    "shadowsocks": (),
+    "hysteria2": (),
+    "wireguard": (),
+}
+
+
+def _sub_transport_choices(u: dict) -> list:
+    """Transports this user's subscription may carry, the stored one first."""
+    proto = (u.get("protocol") or "vless").lower()
+    stored = (u.get("transport") or "ws").lower()
+    order = _SUB_TRANSPORT_ORDER.get(proto) or ()
+    if not order:
+        return [stored]                # single-config protocol (SS / Hy2 / WG)
+    allowed = _SERVED_TRANSPORTS.get(proto) or set(order)
+    if "tcp" in order and not (db.get_meta("reality_pub") or config.tls_ready()):
+        order = tuple(t for t in order if t != "tcp")   # no raw config without keys
+    rest = [t for t in order if t in allowed and t != stored]
+    return [stored] + rest
+
+
+def _sub_variant(u: dict, transport: str) -> dict:
+    """The same user row as it would look if this transport were its stored one."""
+    row = dict(u)
+    row["transport"] = transport
+    if transport == "tcp":
+        proto = (row.get("protocol") or "vless").lower()
+        # Trojan is TLS-only; VLESS/VMess prefer Reality when the fleet has keys.
+        if proto == "trojan":
+            row["security"] = "tls"
+        elif db.get_meta("reality_pub"):
+            row["security"] = "reality"
+        else:
+            row["security"] = "tls"
+    return row
+
+
+def _sub_entries(u: dict, request: Request | None) -> list:
+    """Every config this user's subscription *can* carry, in a stable order.
+
+    Built through the same decision pipeline as the main link (serving -> endpoint
+    -> plan), so every entry is a link a client can really connect to. Duplicates
+    are dropped: on an HTTP edge the raw TCP entry maps to the same XHTTP/TLS link
+    as the XHTTP entry, and offering it twice would only be noise.
+    """
+    settings = db.get_settings()
+    entries: list = []
+    seen: set = set()
+    wg_pub = ""
+    for t in _sub_transport_choices(u):
+        row = _sub_variant(u, t)
+        plan = routing.serving(row)
+        host, port = _user_endpoint(row, request, plan)
+        shown = _apply_plan(row, plan)
+        if (row.get("protocol") or "") == "wireguard":
+            wg_pub = _wg_server_pub(row, plan)
+        local = {**settings}
+        if plan["target"] == "node":
+            local["sni_override"] = ""
+        links = build_links(host, port, shown, local, server_pub=wg_pub)
+        link = links.get("main") or ""
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        adv_t = (plan.get("transport") or t).lower()
+        adv_s = (plan.get("security") or "").lower()
+        # A protocol with a single config (SS / Hysteria2 / WireGuard) is named
+        # after the protocol: its "transport" column is meaningless and showing
+        # "WIREGUARD · WS" in the picker would only confuse the admin.
+        single = not (_SUB_TRANSPORT_ORDER.get((row.get("protocol") or "").lower()) or ())
+        key = (row.get("protocol") or t).lower() if single else t
+        label = key.upper() + (f" · {adv_t.upper()}/{adv_s.upper()}" if (adv_t != key and not single) else "")
+        entries.append({
+            "key": key,
+            "protocol": (row.get("protocol") or "").lower(),
+            "transport": adv_t,
+            "security": adv_s,
+            "label": label,
+            "link": link,
+            "host": host,
+            "port": port,
+            "target": plan["target"],
+        })
+    return entries
+
+
+def _sub_selection(u: dict) -> list:
+    """The transports the admin ticked for this user ([] = all of them)."""
+    raw = u.get("sub_transports") or ""
+    if isinstance(raw, (list, tuple, set)):
+        return [str(x).strip().lower() for x in raw if str(x).strip()]
+    return [x.strip().lower() for x in str(raw).split(",") if x.strip()]
+
+
+def _sub_links(u: dict, request: Request | None) -> list:
+    """Links that go into this user's subscription, honouring the selection."""
+    entries = _sub_entries(u, request)
+    want = _sub_selection(u)
+    if not want:
+        return [e["link"] for e in entries]
+    picked = [e["link"] for e in entries if e["key"] in want]
+    return picked or [e["link"] for e in entries]      # never hand out an empty sub
+
+
 def _apply_plan(u: dict, plan: dict) -> dict:
     """The row as the client must see it (stored row + the plan's transport)."""
     shown = dict(u)
@@ -522,6 +635,7 @@ def _serialize_user(u: dict, with_links: bool = False, request: Request | None =
     out["used_gb"] = round(out["status"]["used"] / (1024 ** 3), 3)
     out["quota_gb"] = round((u.get("quota_bytes") or 0) / (1024 ** 3), 3)
     out["avatar_url"] = _resolve_avatar(u.get("avatar") or "")["url"]
+    out["sub_transports"] = _sub_selection(u)
     _, edge_warnings = _edge_link_view(u)
     if edge_warnings:
         out["edge_warnings"] = edge_warnings
@@ -716,6 +830,10 @@ def _serialize_node(node: dict, status: dict) -> dict:
             "expected": expected,
             "on_node": status.get("users_count"),
             "has_credential": bool(node.get("token")) or bool(config.NODE_SECRET),
+            # which credential the node accepted ("token" = the one issued in the
+            # dashboard, "shared" = TITAN_NODE_SECRET) - shown on the node card so
+            # "the push is refused" is visible instead of implied by a dead link
+            "credential": db.get_meta(f"node_secret_kind:{node['id']}") or "",
             "ok": sync["ok"],
             "at": sync["at"] or None,
             "error": sync["err"],
@@ -1269,9 +1387,11 @@ async def api_create_user(request: Request, _: str = Depends(_require_auth)):
         with _recent_creates_lock:
             _recent_creates[dedup_key] = (time.time(), uid)
     _reload_xray()
+    node_sync = await _sync_node_now(user.get("node_id"))
     _trigger_node_sync()
     db.add_event("info", "user-create", f"{user['name']} ({protocol})", ip=_client_ip(request))
-    return {"ok": True, "user": _serialize_user(user, with_links=True, request=request)}
+    return {"ok": True, "user": _serialize_user(user, with_links=True, request=request),
+            "node_sync": node_sync}
 
 
 @app.get("/api/users/{uid}")
@@ -1366,9 +1486,69 @@ async def api_update_user(uid: str, request: Request, _: str = Depends(_require_
     if updated and updated.get("protocol") == "wireguard":
         updated = wg.ensure_user_keys(updated)
     _reload_xray()
+    node_sync = await _sync_node_now((updated or {}).get("node_id"))
     _trigger_node_sync()
     db.add_event("info", "user-update", f"{uid}", ip=_client_ip(request))
-    return {"ok": True, "user": _serialize_user(updated, with_links=True, request=request)}
+    return {"ok": True, "user": _serialize_user(updated, with_links=True, request=request),
+            "node_sync": node_sync}
+
+
+@app.get("/api/users/{uid}/sub-configs")
+async def api_sub_configs(uid: str, request: Request, _: str = Depends(_require_auth)):
+    """The configs this user's subscription can carry, and which are ticked.
+
+    One user is genuinely served on several transports (the Xray config builds a
+    WS, XHTTP, HTTPUpgrade and gRPC inbound for every VLESS/VMess user), so the
+    subscription link is a *set* the admin chooses — not a single fixed link.
+    """
+    user = db.get_user(uid)
+    if not user:
+        raise HTTPException(404, "not-found")
+    entries = _sub_entries(user, request)
+    picked = _sub_selection(user)
+    for e in entries:
+        e["included"] = (not picked) or (e["key"] in picked)
+    return {
+        "uid": uid,
+        "protocol": user.get("protocol"),
+        "stored_transport": user.get("transport") or "",
+        "sub_url": f"https://{_public_host(request)}/sub/{uid}",
+        "selected": picked,
+        "configs": entries,
+    }
+
+
+@app.patch("/api/users/{uid}/sub-configs")
+async def api_set_sub_configs(uid: str, request: Request, _: str = Depends(_require_auth)):
+    """Pick which configs appear in this user's subscription link."""
+    user = db.get_user(uid)
+    if not user:
+        raise HTTPException(404, "not-found")
+    payload = await request.json()
+    raw = payload.get("transports")
+    if raw is None:
+        raise HTTPException(400, "transports-required")
+    if isinstance(raw, str):
+        raw = [x for x in raw.split(",") if x.strip()]
+    if not isinstance(raw, list):
+        raise HTTPException(400, "transports-required")
+    # "Everything" means every config the admin could actually tick — which is the
+    # deduped entry list, not the raw candidate list: on an HTTP edge the raw-TCP
+    # candidate resolves to the same XHTTP link, so it is never offered twice.
+    entries = _sub_entries(user, request)
+    valid = {e["key"] for e in entries}
+    picked = [str(x).strip().lower() for x in raw if str(x).strip()]
+    if any(x not in valid for x in picked):
+        raise HTTPException(400, "unknown-transport")
+    # An empty selection (or everything) is stored as "" = all, so a user added
+    # later still gets every config without the admin touching this again.
+    stored = "" if (not picked or set(picked) == valid) else ",".join(sorted(set(picked)))
+    db.update_user(uid, {"sub_transports": stored})
+    entries = _sub_entries(db.get_user(uid), request)
+    for e in entries:
+        e["included"] = (not picked) or (e["key"] in picked)
+    db.add_event("info", "sub-configs", f"{uid}: {stored or 'all'}", ip=_client_ip(request))
+    return {"ok": True, "selected": picked, "configs": entries}
 
 
 @app.delete("/api/users/{uid}")
@@ -1666,6 +1846,68 @@ def _reload_xray():
     _spawn(_loop(), name="xray-reload-loop")
 
 
+def _node_setup(node: dict, token: str, request: Request | None) -> dict:
+    """What the freshly created node must be told to accept this panel's pushes.
+
+    A node added by URL alone cannot take users until it knows a credential: its
+    ``secret_valid_for_node`` accepts ``TITAN_NODE_SECRET`` or its own
+    ``TITAN_NODE_TOKEN``, nothing else. The dashboard used to print the token in a
+    toast that disappeared after two seconds, so a node deployed without it
+    silently refused every push and every config fell back to the main domain.
+    These are the variables to paste into the node service.
+    """
+    panel_host = ""
+    if request is not None:
+        try:
+            panel_host = _public_host(request)
+        except Exception:  # noqa: BLE001
+            panel_host = ""
+    scheme = "http" if panel_host.startswith(("127.", "localhost")) else "https"
+    env = {
+        "TITAN_ROLE": "node",
+        "TITAN_NODE_TOKEN": token,
+        "TITAN_NODE_URL": (node.get("address") or "").strip(),
+    }
+    if panel_host:
+        env["TITAN_MAIN_URL"] = f"{scheme}://{panel_host}"
+    return {
+        "token": token,
+        "env": env,
+        "lines": [f"{k}={v}" for k, v in env.items()],
+        "note": ("این متغیرها را روی سرویسِ نود بگذار و دوباره دیپلوی کن؛ "
+                 "یا به‌جای توکن، TITAN_NODE_SECRET را روی پنل و نود یکسان تنظیم کن."),
+    }
+
+
+async def _sync_node_now(node_id) -> dict:
+    """Push one node *during* the request that assigned it.
+
+    The background push (`_trigger_node_sync`) is fire-and-forget, so the response
+    to "create/patch this user" used to carry links built from the state *before*
+    the node had the user: the admin copied a panel link, the node got the user a
+    moment later, and the client kept dialling the main domain. Waiting for the
+    node here (bounded, ~6s) means the returned links already point at the server
+    that will answer them — and if the node refuses, the response says why instead
+    of silently falling back.
+    """
+    try:
+        nid = db.coerce_node_id(node_id)
+    except Exception:  # noqa: BLE001
+        return {}
+    node = db.get_node(nid) if nid else None
+    if not node or node.get("is_local") or not (node.get("address") or "").strip():
+        return {}
+    ok = await nodesync.sync_one(nid)
+    st = routing.sync_state(nid)
+    return {
+        "node_id": nid,
+        "node_name": node.get("name") or "",
+        "ok": bool(ok),
+        "error": "" if ok else (st.get("err") or "sync-failed"),
+        "served_by": "node" if ok else "panel",
+    }
+
+
 def _trigger_node_sync():
     """Push user changes to remote nodes without blocking the request."""
     try:
@@ -1782,7 +2024,12 @@ async def api_create_node(request: Request, _: str = Depends(_require_auth)):
         "token": token,
     })
     db.add_event("info", "node-create", name, ip=_client_ip(request))
-    return {"ok": True, "node": _serialize_node(node, await _node_status(node)), "token": token}
+    # Prove the upload path right now: the admin learns whether this node can
+    # really take users, instead of finding out when a config later falls back.
+    node_sync = await _sync_node_now(node["id"])
+    return {"ok": True, "node": _serialize_node(node, await _node_status(node)),
+            "sync_now": node_sync, "token": token,
+            "setup": _node_setup(node, token, request)}
 
 
 @app.patch("/api/nodes/{node_id}")
@@ -1817,6 +2064,8 @@ async def api_update_node(node_id: int, request: Request, _: str = Depends(_requ
         fields["flag"] = _flag_for(fields["country_code"])
     updated = db.update_node(node_id, fields)
     db.add_event("info", "node-update", str(node_id), ip=_client_ip(request))
+    if any(k in fields for k in ("address", "enabled")):
+        await _sync_node_now(node_id)      # re-verify after an address/enable change
     return {"ok": True, "node": _serialize_node(updated, await _node_status(updated))}
 
 
@@ -2078,7 +2327,7 @@ async def sub_plain(uid: str, request: Request):
     if not user:
         raise HTTPException(404, "not-found")
     links = _links_for(user, request)
-    combined = [c["link"] for c in links["info"]] + links["all"]
+    combined = [c["link"] for c in links["info"]] + _sub_links(user, request)
     body = subscription_text(combined)
     headers = _sub_headers(user)
     return Response(content=body, media_type="text/plain", headers=headers)
@@ -2100,7 +2349,7 @@ async def sub_json(uid: str, request: Request):
         "used_gb": round(st["used"] / (1024 ** 3), 3),
         "days_left": st["days_left"],
         "active_connections": st["active_connections"],
-        "links": links["all"],
+        "links": _sub_links(user, request),
         "main_link": links["main"],
     }, headers=_sub_headers(user))
 
@@ -2111,7 +2360,7 @@ async def sub_base64(uid: str, request: Request):
     if not user:
         raise HTTPException(404, "not-found")
     links = _links_for(user, request)
-    combined = [c["link"] for c in links["info"]] + links["all"]
+    combined = [c["link"] for c in links["info"]] + _sub_links(user, request)
     return PlainTextResponse(subscription_text(combined), headers=_sub_headers(user))
 
 
