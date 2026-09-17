@@ -108,6 +108,50 @@ TLS_KEY_FILE = os.environ.get("TITAN_TLS_KEY", "")
 
 IS_RAILWAY = bool(os.environ.get("RAILWAY_SERVICE_ID") or os.environ.get("RAILWAY_PROJECT_ID"))
 
+# ---------------------------------------------------------------- edge exposure
+# Platforms like Railway expose exactly one HTTP(S) edge and nothing else. TCP to
+# any other port is *accepted* by the edge and then never answered - we measured
+# it: connect() succeeds, zero bytes come back, the client hangs until its own
+# timeout. A link pointing at such a port is not "blocked", it is unreachable by
+# construction, and no client setting can fix it. So the panel must never emit
+# one: when the edge is HTTP-only, only transports the edge can carry (WS, XHTTP,
+# HTTPUpgrade, gRPC over 443) may appear in a link.
+def _flag(name: str, default: bool) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+EDGE_HTTP_ONLY = _flag("TITAN_EDGE_HTTP_ONLY",
+                       bool(os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+                            or os.environ.get("RAILWAY_TCP_PROXY_DOMAIN")))
+
+# The one way raw TCP (Reality / SS / Hy2) becomes reachable: a platform TCP
+# proxy. Railway injects these two variables as soon as the proxy exists
+# (Settings -> Networking -> TCP Proxy), so no manual configuration is needed.
+TCP_PROXY_DOMAIN = (os.environ.get("TITAN_TCP_PROXY_DOMAIN")
+                    or os.environ.get("RAILWAY_TCP_PROXY_DOMAIN") or "").strip()
+try:
+    TCP_PROXY_PORT = int(os.environ.get("TITAN_TCP_PROXY_PORT")
+                         or os.environ.get("RAILWAY_TCP_PROXY_PORT") or 0)
+except ValueError:
+    TCP_PROXY_PORT = 0
+
+
+def tcp_proxy() -> tuple | None:
+    """(host, port) of the platform TCP proxy, or None when there is none."""
+    if TCP_PROXY_DOMAIN and 1 <= TCP_PROXY_PORT <= 65535:
+        return TCP_PROXY_DOMAIN, TCP_PROXY_PORT
+    return None
+
+
+#: Transports the HTTP edge can carry end to end (the container's nginx proxies
+#: each of these to the matching Xray inbound).
+EDGE_TRANSPORTS = {"ws", "xhttp", "httpupgrade", "grpc"}
+
 # Reality (VLESS) — destination to masquerade as + SNI to present.
 REALITY_DEST = os.environ.get("TITAN_REALITY_DEST", "1.1.1.1:443")
 REALITY_SNI = os.environ.get("TITAN_REALITY_SNI", "www.microsoft.com")
