@@ -1912,15 +1912,19 @@ async def api_public_status(uid: str):
 
 # ------------------------------------------------------------------ system
 @app.get("/healthz")
-async def healthz():
+async def healthz(request: Request):
     """Ultra-fast liveness probe for Railway healthcheck - no DB, no WG.
 
-    `listen_host`/`listen_port` are here on purpose: if the panel answers at all,
-    the payload says which socket answered, so "the edge reached us on a port we
-    did not expect" is visible from one curl instead of a support round-trip.
+    `listen_host`/`listen_port` are the panel's own socket. `edge_port` is the
+    port nginx received the connection on (nginx forwards it as a request header
+    - `proxy_set_header` does not touch the client response, so the panel has to
+    echo it). Because the panel only answers if the whole chain worked, that one
+    number is what makes "the platform edge reached us on a port nobody expected"
+    visible from a single curl instead of a support round-trip.
     """
     return {"status": "ok", "ts": time.time(), "version": APP_VERSION,
-            "listen_host": config.PANEL_HOST, "listen_port": config.PANEL_PORT}
+            "listen_host": config.PANEL_HOST, "listen_port": config.PANEL_PORT,
+            "edge_port": request.headers.get("x-titan-listen-port") or ""}
 
 @app.get("/health")
 async def health():

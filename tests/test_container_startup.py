@@ -166,6 +166,18 @@ def test_panel_host_env_replaces_the_bind_list(monkeypatch):
     assert config._panel_hosts() == ["127.0.0.1"]
 
 
+def test_healthz_reports_the_port_the_edge_reached_us_on(client):
+    """The one number that makes a port-mismatch 502 self-diagnosing.
+
+    nginx forwards it as a *request* header (proxy_set_header never touches the
+    client response), so the panel is the side that has to echo it.
+    """
+    base = client.get("/healthz").json()
+    assert base["listen_port"] == config.PANEL_PORT and "edge_port" in base
+    echoed = client.get("/healthz", headers={"X-TiTaN-Listen-Port": "8080"}).json()
+    assert echoed["edge_port"] == "8080"
+
+
 def test_entrypoint_without_nginx_moves_the_panel_onto_the_public_port(container):
     """A start command or image without nginx must still answer $PORT - otherwise
     Railway shows 'Application failed to respond' with a perfectly healthy panel."""
