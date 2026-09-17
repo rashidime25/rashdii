@@ -72,6 +72,26 @@ def test_the_bridge_renders_icon_actions_and_luxury_cards():
     assert "const ICONS" in BRIDGE and BRIDGE.count("'<path") + BRIDGE.count("'<rect") >= 10
 
 
+def test_the_latency_advisor_measures_from_the_client():
+    """The ping that matters is client -> exit, which only a browser can measure.
+
+    The panel's own node cards show panel -> node latency; that number is not the
+    one a user feels. The advisor fires cache-busted no-store requests from the
+    admin's browser at the panel edge, every enabled node and Cloudflare's nearest
+    PoP, so the panel can tell which exit is actually closest to the admin.
+    """
+    assert "async function openLatencyAdvisor()" in BRIDGE
+    assert "async function rttBest(" in BRIDGE and "'no-store'" in BRIDGE
+    assert "cp.cloudflare.com/generate_204" in BRIDGE, "no Cloudflare floor to compare against"
+    assert "'no-cors'" in BRIDGE, "node probes must be cross-origin safe"
+    assert "x-railway-edge" in BRIDGE, "the serving region is not reported"
+    # the header's pulse button is the entry point, and it is not a text button
+    assert "data-act','advisor'" in BRIDGE
+    assert 'data-tip="پینگ‌سنج' in DASHBOARD
+    for cls in (".lat-row", ".lat-ms", ".lat-verdict", ".lat-custom"):
+        assert cls in DASHBOARD, f"{cls} is not styled"
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_the_bridge_renders_every_section():
     """Runs the real bridge against a stub DOM and a real API shape."""

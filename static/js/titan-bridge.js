@@ -43,6 +43,152 @@
   if(!toastEl){ toastEl=document.createElement('div'); toastEl.id='titanToast'; toastEl.style.cssText='position:fixed;left:50%;bottom:22px;transform:translate(-50%,14px);opacity:0;pointer-events:none;padding:10px 16px;border-radius:12px;color:#eeeaff;background:rgba(6,8,35,.94);border:1px solid rgba(104,77,255,.45);box-shadow:0 0 24px rgba(75,40,255,.18);backdrop-filter:blur(12px);transition:.24s;z-index:9999;font-size:12px;'; document.body.appendChild(toastEl); }
   function toast(m){ toastEl.textContent=m; toastEl.style.opacity='1'; toastEl.style.transform='translate(-50%,0)'; clearTimeout(toastEl._t); toastEl._t=setTimeout(()=>{toastEl.style.opacity='0';toastEl.style.transform='translate(-50%,14px)';},2200); }
 
+  // ── latency advisor (پینگ‌سنج) ─────────────────────────────────────────────
+  // The distance that decides a client's ping is client -> exit, and only the
+  // client can measure it. Everything below is a tiny no-store request sent
+  // from *this browser*; node probes go cross-origin as `no-cors` (the payload
+  // is opaque, the round-trip is not) so a node needs no extra endpoint and an
+  // old node build still answers.
+  const EDGE_POPS = {sjc1:'آمریکا — سن‌خوزه', iad1:'آمریکا — ویرجینیا', ams1:'هلند — آمستردام',
+                     fra1:'آلمان — فرانکفورت', lon1:'انگلستان — لندن', sin1:'سنگاپور',
+                     bom1:'هند — بمبئی', dxb1:'امارات — دبی', cdg1:'فرانسه — پاریس'};
+  function latBand(ms){
+    if(ms==null) return ['off','—'];
+    if(ms<70)  return ['ok','هم‌سایه (ترکیه/امارات)'];
+    if(ms<120) return ['ok','اروپا'];
+    if(ms<180) return ['mid','دورتر از حد مطلوب'];
+    return ['bad','آمریکا/دور'];
+  }
+  function latCb(url){ return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'cb=' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+  function latNow(){ return (window.performance && performance.now) ? performance.now() : Date.now(); }
+  async function rttOnce(url, mode, timeout){
+    const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    const timer = ctl ? setTimeout(()=>{ try{ ctl.abort(); }catch(e){} }, timeout||4000) : null;
+    const t0 = latNow();
+    try{
+      await fetch(latCb(url), {cache:'no-store', mode: mode||'cors', credentials:'omit',
+                               signal: ctl?ctl.signal:undefined, redirect:'follow'});
+      return Math.max(1, Math.round(latNow() - t0));
+    }catch(e){ return null; }
+    finally{ if(timer) clearTimeout(timer); }
+  }
+  // The first request pays DNS + TLS, the rest reuse the connection: only the
+  // later samples describe the link itself, so they are what gets reported.
+  async function rttBest(url, mode, samples){
+    const n = samples||3; let best=null, sum=0, cnt=0;
+    for(let i=0; i<=n; i++){
+      const ms = await rttOnce(url, mode, 4000);
+      if(ms==null) continue;
+      if(i>0){ best = (best==null||ms<best)? ms : best; sum+=ms; cnt++; }
+    }
+    return cnt ? {ms:best, avg:Math.round(sum/cnt), n:cnt} : null;
+  }
+
+  async function openLatencyAdvisor(){
+    const nodesRes = await apiJson('/api/nodes').catch(()=>({nodes:[]}));
+    const nodes = (nodesRes.nodes||[]).filter(n=>n.enabled!==false);
+    const rows = [];
+    const add=(key,name,url,mode,extra)=> rows.push(Object.assign({key:key,name:name,url:url||'',mode:mode||'cors',result:null}, extra||{}));
+
+    add('panel','پنل (همین آدرسی که باز است)','/healthz','same-origin',{hint:'لینک‌هایی که روی پنل سرو می‌شوند از همین مسیر می‌آیند'});
+    nodes.forEach(n=>{
+      const addr = String(n.address||'').replace(/\/+$/,'');
+      const label = (n.flag||'') + ' ' + (n.name||'node');
+      if(!addr){ add('n'+n.id, label, '', 'cors', {skip:'آدرسی ثبت نشده'}); return; }
+      if(addr.indexOf('http://')===0){ add('n'+n.id, label, '', 'cors', {skip:'آدرس http است؛ از صفحهٔ https اندازه‌گیری نمی‌شود'}); return; }
+      const base = addr.indexOf('http')===0 ? addr : 'https://'+addr;
+      add('n'+n.id, label+' (نود)', base+'/healthz', 'no-cors', {node:true});
+    });
+    add('cf','نزدیک‌ترین نقطهٔ Cloudflare','https://cp.cloudflare.com/generate_204','no-cors',{hint:'کفِ پینگ ممکن برای یک سرور نزدیکِ شما'});
+
+    const rowHtml=(r)=>{
+      const b = latBand(r.result && r.result.ms);
+      const val = r.skip ? '<span class="muted">—</span>'
+                : (r.result ? `<b class="lat-ms ${b[0]}">${r.result.ms}</b> <span class="muted">ms</span>`
+                             : '<span class="lat-spin">…</span>');
+      return `<div class="lat-row" id="lat-${esc(r.key)}"><span class="lat-name"${r.hint?' data-tip="'+esc(r.hint)+'"':''}>${esc(r.name)}</span>`
+           + `<span class="lat-val">${val}</span><span class="lat-tag pill ${b[0]}">${esc(r.skip||b[1])}</span></div>`;
+    };
+
+    const body = `<div style="display:grid;gap:12px">
+      <p style="margin:0;font-size:11.5px;color:#a8a6bf;line-height:2">
+        این عدد، رفت‌وبرگشت واقعی از <b>همین دستگاه</b> تا هر مقصد است — نه پینگ پنل به نود.
+        هرچه خروجیِ کانفیگ به شما نزدیک‌تر باشد، پینگ کمتر می‌شود.
+      </p>
+      <div class="lat-grid" id="latGrid">${rows.map(rowHtml).join('')}</div>
+      <div class="lat-verdict" id="latVerdict"><span class="lat-spin">…</span> در حال اندازه‌گیری</div>
+      <div class="lat-custom">
+        <input id="latCustom" dir="ltr" placeholder="https://host  یا  host:443">
+        ${icoBtn({id:'latCustomGo'},'pulse','اندازه‌گیری این آدرس','violet')}
+      </div>
+      <p style="margin:0;font-size:10.5px;color:#8586a8;line-height:2">
+        مرجع پینگ از ایران: ترکیه ۳۹–۵۰ · امارات ۳۹ · آلمان ۷۵–۱۲۰ · هلند ۸۰–۱۱۰ · آمریکا ۲۵۰+
+      </p>
+    </div>`;
+
+    createModal('پینگ‌سنج — اندازه‌گیری از همین دستگاه', body, async ()=>'');
+    const overlay = $('#titanModal');
+    if(!overlay) return;
+
+    let panelEdge = {pop:'', zone:''};
+    try{
+      const hr = await fetch(latCb('/healthz'), {cache:'no-store'});
+      panelEdge = {pop: hr.headers.get('x-railway-edge')||'', zone: hr.headers.get('x-railway-upstream-zone')||''};
+    }catch(e){ /* not on Railway / header unavailable: the number still counts */ }
+
+    const draw=(r)=>{ const el = overlay.querySelector('#lat-'+r.key); if(el) el.outerHTML = rowHtml(r); };
+
+    const measure=async()=>{
+      const v = overlay.querySelector('#latVerdict');
+      if(v) v.innerHTML = '<span class="lat-spin">…</span> در حال اندازه‌گیری';
+      for(const r of rows){
+        if(r.skip || !r.url) continue;
+        r.result = await rttBest(r.url, r.mode, 3);
+        draw(r);
+      }
+      const done = rows.filter(r=>r.result);
+      const byMs = done.slice().sort((a,b)=>a.result.ms-b.result.ms);
+      const panel = rows.find(r=>r.key==='panel');
+      const cf = rows.find(r=>r.key==='cf');
+      const nodies = done.filter(r=>r.node);
+      const lines = [];
+      if(byMs.length) lines.push(`سریع‌ترین مسیر از دستگاه شما: <b>${esc(byMs[0].name)}</b> با <b>${byMs[0].result.ms} ms</b>`);
+      if(panel && panel.result && cf && cf.result){
+        const gap = panel.result.ms - cf.result.ms;
+        if(gap > 50) lines.push(`هر لینکی که روی <b>پنل</b> سرو شود، <b>${gap} ms</b> دورتر از یک سرور نزدیک شماست — این همان چیزی است که «پینگِ قبلاً کمتر بود» را توضیح می‌دهد.`);
+      }
+      if(nodies.length){
+        const best = nodies.slice().sort((a,b)=>a.result.ms-b.result.ms)[0];
+        const floor = cf && cf.result ? cf.result.ms : null;
+        if(floor!=null && best.result.ms - floor > 50)
+          lines.push(`بهترین نود شما <b>${esc(best.name)}</b> با <b>${best.result.ms} ms</b>؛ تا کفِ ممکن ≈ <b>${best.result.ms - floor} ms</b> فاصله دارد. یک نود در همان شهرِ نزدیک (امارات/ترکیه) این فاصله را حذف می‌کند.`);
+        else lines.push(`بهترین نود شما (<b>${esc(best.name)}</b>) نزدیک کفِ ممکن است ✓`);
+      }
+      if(panelEdge.pop) lines.push(`منطقهٔ فعلی پنل: <b dir="ltr">${esc(panelEdge.pop)}</b>${EDGE_POPS[panelEdge.pop] ? ' — '+esc(EDGE_POPS[panelEdge.pop]) : ''}${panelEdge.zone ? ' <span dir="ltr" class="muted">('+esc(panelEdge.zone)+')</span>' : ''}`);
+      if(v) v.innerHTML = lines.join('<br>') || 'چیزی قابل اندازه‌گیری نبود.';
+    };
+
+    setTimeout(()=>{
+      const save = overlay.querySelector('#titanModalSave');
+      if(save){ save.textContent='اندازه‌گیری مجدد'; save.onclick=()=>{ save.disabled=true; measure().finally(()=>{ save.disabled=false; }); }; }
+      const cancel = overlay.querySelector('#titanModalCancel'); if(cancel) cancel.textContent='بستن';
+      const go = overlay.querySelector('#latCustomGo'), input = overlay.querySelector('#latCustom');
+      if(go && input) go.onclick = async()=>{
+        let u = String(input.value||'').trim(); if(!u) return;
+        if(u.indexOf('://') < 0) u = 'https://'+u;
+        const path = u.replace(/^https?:\/\/[^\/]+/i, '');
+        if(!path || path === '/') u = u.replace(/\/+$/,'') + '/healthz';
+        const r = {key:'x'+Date.now().toString(36), name:u.replace(/^https?:\/\//,''), url:u, mode:'no-cors', result:null, node:true};
+        rows.push(r);
+        const grid = overlay.querySelector('#latGrid'); if(grid) grid.insertAdjacentHTML('beforeend', rowHtml(r));
+        go.disabled = true;
+        try{ r.result = await rttBest(r.url, r.mode, 3); draw(r); }
+        finally{ go.disabled = false; }
+      };
+      measure();
+    }, 20);
+  }
+
   // --- gallery picker (real, as in old panel) ---
   function avatarUrl(key){
     key=key||''; if(key.startsWith('gallery:')) return '/static/img/gallery/'+key.slice(8)+'.svg'; if(key.startsWith('upload:')) return '/api/gallery-image/'+key.slice(7); return '/static/img/titan-avatar.svg';
@@ -751,6 +897,11 @@
       refreshServers();
       document.addEventListener('titan:refresh', refreshServers);
       const addBtn=serversSection.querySelector('.section-btn.primary'); if(addBtn) addBtn.onclick=()=> openNodeModal();
+      // The section head also carries a pulse button ("بررسی اتصال نودها").
+      // It now measures the one thing the server can never know: the distance
+      // from the admin's own device to every exit.
+      const advBtn=serversSection.querySelector('.section-head .section-btn:not(.primary)');
+      if(advBtn){ advBtn.setAttribute('data-act','advisor'); advBtn.onclick=()=> openLatencyAdvisor(); }
       $$('button',serversSection).forEach(b=>{ if(b.dataset.demo) b.removeAttribute('data-demo'); });
     }
 

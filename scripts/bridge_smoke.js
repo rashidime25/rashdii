@@ -161,6 +161,20 @@ const check = (cond, msg) => { if (!cond) failures.push(msg); };
   check(grid.includes('shared secret'), 'the node card does not name the accepted credential');
   check(grid.includes('حالت نگهداری'), 'the maintenance state is missing');
 
+  // ── latency advisor (client-side ping, not the panel->node probe) ────────
+  const bridgeSrc = src;                       // the real bridge, as loaded above
+  const dashboardSrc = fs.readFileSync(path.join(REPO, 'templates/dashboard.html'), 'utf8');
+  check(/openLatencyAdvisor/.test(bridgeSrc), 'the latency advisor is not in the bridge');
+  check(/data-act','advisor'/.test(bridgeSrc), 'the section-head pulse button is not bound to the advisor');
+  check(/cp\.cloudflare\.com\/generate_204/.test(bridgeSrc), 'the advisor does not measure the Cloudflare floor');
+  check(/no-cors/.test(bridgeSrc) && /cache:'no-store'/.test(bridgeSrc),
+    'the advisor probes are not cache-busted cross-origin requests');
+  check(/x-railway-edge/.test(bridgeSrc), 'the advisor does not read the serving region header');
+  check(/\.lat-row/.test(dashboardSrc || '') && /\.lat-verdict/.test(dashboardSrc || ''),
+    'the advisor rows are not styled in the dashboard');
+  const advisorBtn = html(el('.section-view[data-section="servers"] .section-head'));
+  check(/data-tip="پینگ‌سنج/.test(dashboardSrc || ''), 'the section head does not offer the ping tool');
+
   // ── dashboard strip ──────────────────────────────────────────────────────
   const strip = html(el('.server-content'));
   check(strip.includes('sr-medal'), 'the dashboard server strip has no flag medal');
