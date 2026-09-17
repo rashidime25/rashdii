@@ -64,7 +64,11 @@ def test_no_action_button_in_those_sections_carries_a_persian_word(section):
 
 def test_the_bridge_renders_icon_actions_and_luxury_cards():
     assert "function icoBtn(" in BRIDGE and "function nodeCard(" in BRIDGE
-    assert "class=\"mini-btn\"" not in BRIDGE, "a table row still renders a text button"
+    assert "class=\"mini-btn\"" not in BRIDGE, "a row or modal still renders a text button"
+    # the two actions the new tables added: QR and on/off, in both sections
+    for act in ('"data-act":"qr"', '"data-act":"power"', '"data-act":"configs"'):
+        assert act in BRIDGE, f"{act} is not wired"
+    assert "openSubConfigModal" in BRIDGE and "openNodeSetupModal" in BRIDGE
     assert "const ICONS" in BRIDGE and BRIDGE.count("'<path") + BRIDGE.count("'<rect") >= 10
 
 

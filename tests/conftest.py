@@ -173,3 +173,32 @@ def make_user(admin):
     yield _make
     for uid in uids:
         admin.delete(f"/api/users/{uid}")
+
+
+@pytest.fixture()
+def reachable_node(monkeypatch):
+    """A node the panel can really push to: the HTTP call is replaced, the rule is not.
+
+    Tests that record a sync by hand cannot reach the code path the admin
+    complained about — "assign the node, copy the config, and the client still
+    dials the main domain" — because that path is the *response to the assignment*.
+    This fixture lets the push succeed (recording the uid set exactly the way
+    ``nodesync.sync_node`` does), so the whole chain serving → endpoint → link runs
+    for real. ``state["fail"] = "HTTP 401"`` makes every push fail instead.
+    """
+    from app import nodes as nodesync
+    from app import routing
+
+    state = {"pushes": [], "fail": None}
+
+    async def fake_sync(node, users, timeout=8.0):
+        if state["fail"]:
+            routing.record_sync(node["id"], False, err=state["fail"])
+            return False
+        uids = [u["uid"] for u in users]
+        state["pushes"].append({"node": node["id"], "uids": uids})
+        routing.record_sync(node["id"], True, uids=uids)
+        return True
+
+    monkeypatch.setattr(nodesync, "sync_node", fake_sync)
+    yield state

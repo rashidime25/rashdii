@@ -54,7 +54,7 @@ const NODES = [
   { id: 2, name: 'Amsterdam-01', is_local: false, enabled: true, address: 'https://amsterdam-01.up.railway.app', flag: '🇳🇱',
     city: 'Amsterdam', country_code: 'NL', country: 'Netherlands', last_seen: 1789000000,
     status: { online: true, latency_ms: 118, cpu: 34, ram: 52, disk: 91, version: '1.0.0', uptime: '2d', reason: '' },
-    sync: { expected: 3, on_node: 3, has_credential: true, ok: true, at: 1789000000, error: '', serving: ['u1', 'u2', 'u3'] },
+    sync: { expected: 3, on_node: 3, has_credential: true, credential: 'shared', ok: true, at: 1789000000, error: '', serving: ['u1', 'u2', 'u3'] },
     edge: { scheme: 'https', port: 443, measured: true }, raw_open: { [RAW_OPEN]: false } },
   { id: 3, name: 'Frankfurt-VPS', is_local: false, enabled: true, address: 'https://fra.example.com:8443', flag: '🇩🇪',
     city: 'Frankfurt', country_code: 'DE', country: 'Germany', last_seen: 1789000000,
@@ -74,6 +74,7 @@ const NODES = [
 ];
 const USERS = [
   { uid: 'u1', name: 'reza', protocol: 'vless', node_id: 2, enabled: true, expire_at: 1790000000, created_at: 1788000000,
+    sub_transports: ['ws', 'grpc'], main_link: 'vless://x@node.up.railway.app:443?type=ws',
     status: { used: 12 * 1024 ** 3, expired: false, live_enabled: true, active_connections: 1 } },
   { uid: 'u2', name: 'sara', protocol: 'vmess', node_id: 0, enabled: false, created_at: 1788000000,
     status: { used: 0, expired: false, live_enabled: false, active_connections: 0 } },
@@ -141,14 +142,24 @@ const check = (cond, msg) => { if (!cond) failures.push(msg); };
   check(!grid.includes('>ویرایش<') && !grid.includes('>حذف<'), 'a server action still shows a Persian word');
 
   // ── users / configs / subscriptions: premium icon actions ────────────────
-  for (const [name, acts] of [['users', ['edit', 'detail', 'del']], ['configs', ['edit', 'links', 'del']],
-                              ['subscriptions', ['copy', 'qr', 'view']]]) {
+  for (const [name, acts] of [['users', ['edit', 'detail', 'del', 'qr', 'power']],
+                              ['configs', ['edit', 'links', 'del', 'qr', 'power']],
+                              ['subscriptions', ['copy', 'qr', 'view', 'configs']]]) {
     const tbody = html(inSection(name, '.data-table tbody'));
     check(tbody.length > 40, `${name}: the table stayed empty`);
     check(!tbody.includes('mini-btn'), `${name}: a text button is still rendered`);
     check((tbody.match(/ico-btn/g) || []).length >= USERS.length, `${name}: rows have no icon actions`);
     for (const act of acts) check(tbody.includes(`data-act="${act}"`), `${name}: missing the ${act} action`);
   }
+
+  // the subscription row shows how many configs the link carries
+  const subs = html(inSection('subscriptions', '.data-table tbody'));
+  check(subs.includes('sub-count'), 'the subscription rows do not show the config count');
+  check(/sub-count[^>]*>2</.test(subs), 'the picked config count is not rendered (' + subs.slice(0, 120) + ')');
+
+  // a node that can serve shows *which* credential it accepted
+  check(grid.includes('shared secret'), 'the node card does not name the accepted credential');
+  check(grid.includes('حالت نگهداری'), 'the maintenance state is missing');
 
   // ── dashboard strip ──────────────────────────────────────────────────────
   const strip = html(el('.server-content'));

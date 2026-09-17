@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import secrets
+import time
 
 import httpx
 
@@ -94,9 +95,26 @@ def _node_url(node: dict) -> str | None:
     return addr.rstrip("/")
 
 
-def _sync_secret(node: dict) -> str:
-    """Credential the main panel presents when pushing to a node."""
-    return node.get("token") or config.NODE_SECRET
+def _sync_secrets(node: dict) -> list[tuple[str, str]]:
+    """Credentials to present to a node, best first — [(secret, kind)].
+
+    A node added by hand in the dashboard is issued a per-node token by the
+    panel, but a node deployed with only ``TITAN_NODE_SECRET`` knows the shared
+    secret and rejects that token (its own ``secret_valid_for_node`` accepts the
+    shared secret or its own configured token, nothing else). The panel used to
+    send exactly one credential, get HTTP 401 and give up — which is why "add a
+    node, assign a user" left the config on the main domain: the node never
+    received the user, so the link fell back to the panel.
+
+    Both are tried here, and whichever worked is remembered
+    (``node_secret_kind:`` meta) and offered first next time.
+    """
+    token = (node.get("token") or "").strip()
+    shared = (config.NODE_SECRET or "").strip()
+    pairs = [("token", token), ("shared", shared)]
+    if db.get_meta(f"node_secret_kind:{node['id']}") == "shared":
+        pairs.reverse()
+    return [(secret, kind) for kind, secret in pairs if secret]
 
 
 def _payload_hash(users: list[dict]) -> str:
@@ -125,30 +143,67 @@ async def sync_node(node: dict, users: list[dict], timeout: float = 8.0) -> bool
     The outcome (and, on success, the exact uid set the node now has) is recorded
     so link building can tell "this node really has this user" from "we hoped it
     did" — that difference is the whole reason a node config used to time out.
+
+    Every credential the node might accept is tried (see ``_sync_secrets``); the
+    first one that answers 200 is remembered for next time.
     """
     url = _node_url(node)
-    if not url or not _sync_secret(node):
+    candidates = _sync_secrets(node)
+    if not url or not candidates:
         routing.record_sync(node["id"], False, err="no-address-or-credential")
         return False
     uids = [u["uid"] for u in users]
-    payload = {
-        "secret": _sync_secret(node),
+    body = {
         "users": [user_sync_payload(u) for u in users],
         "reality": _reality_payload(),
     }
+    last_err = ""
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as cl:
-            r = await cl.post(f"{url}/api/node/sync", json=payload)
-            ok = r.status_code == 200
-            if not ok:
-                log.warning("node sync failed for %s: HTTP %s", url, r.status_code)
-            routing.record_sync(node["id"], ok, uids=uids if ok else None,
-                                err="" if ok else f"HTTP {r.status_code}")
-            return ok
+            for secret, kind in candidates:
+                r = await cl.post(f"{url}/api/node/sync", json={"secret": secret, **body})
+                if r.status_code == 200:
+                    db.set_meta(f"node_secret_kind:{node['id']}", kind)
+                    routing.record_sync(node["id"], True, uids=uids)
+                    return True
+                last_err = f"HTTP {r.status_code}"
+                log.warning("node sync failed for %s (%s credential): HTTP %s",
+                            url, kind, r.status_code)
     except Exception as e:  # noqa: BLE001
         log.warning("node sync error for %s: %s", url, e)
-        routing.record_sync(node["id"], False, err=type(e).__name__)
+        last_err = type(e).__name__
+    # 401/403 with every credential means the node does not know this panel: say
+    # so instead of a bare HTTP code, because that is what the admin must fix.
+    if last_err.startswith("HTTP 40"):
+        last_err += " (credential rejected — set TITAN_NODE_SECRET on the node, or "\
+                    "deploy it with the token from the node's setup command)"
+    routing.record_sync(node["id"], False, err=last_err)
+    return False
+
+
+def node_user_list(node: dict) -> list[dict]:
+    """The users this node must run: its own plus the auto-routed (node_id=0)."""
+    users = db.list_users()
+    return sorted([u for u in users if user_node_id(u) in (node["id"], 0)],
+                  key=lambda x: x["uid"])
+
+
+async def sync_one(node_id: int, timeout: float = 6.0) -> bool:
+    """Push one node right now, and return whether it took the users.
+
+    Called when the admin assigns a node (to a user or while creating the node):
+    the response of that very request then carries a link that already points at
+    a node which has the user, instead of the panel link the admin used to copy
+    while the background sync was still in flight.
+    """
+    node = db.get_node(node_id)
+    if not node or node.get("is_local") or not node.get("enabled"):
         return False
+    node_users = node_user_list(node)
+    ok = await sync_node(node, node_users, timeout=timeout)
+    if ok:
+        db.set_meta(f"node_sync_hash:{node_id}", _payload_hash(node_users))
+    return ok
 
 
 async def sync_all() -> dict[str, bool]:
@@ -162,15 +217,27 @@ async def sync_all() -> dict[str, bool]:
     for node in db.list_nodes():
         if node.get("is_local") or not node.get("enabled"):
             continue
-        if not node.get("token") and not config.NODE_SECRET:
+        if not _sync_secrets(node):
+            routing.record_sync(node["id"], False, err="no-credential")
             continue
         node_users = sorted(
             [u for u in users if user_node_id(u) in (node["id"], 0)],
             key=lambda x: x["uid"],
-        )
-        # skip re-push when nothing changed since the last successful sync
+        )  # same rule as node_user_list(), computed from the shared snapshot
+        # Skip a re-push only while the node still counts as freshly verified.
+        #
+        # The uid set the panel pushed is only trusted for `routing.SYNC_TTL`; the
+        # payload hash alone used to be enough to skip the push, so an idle fleet
+        # (nobody edited a user for 15 minutes) stopped refreshing that stamp and
+        # every node link silently fell back to the panel. Re-pushing an unchanged
+        # payload at least every SYNC_TTL/3 keeps the stamp honest, and if the node
+        # is down the push fails — which is exactly the signal the link needs.
         h = _payload_hash(node_users)
-        if db.get_meta(f"node_sync_hash:{node['id']}") == h:
+        st = routing.sync_state(node["id"])
+        still_fresh = bool(
+            st["ok"] is True and st["at"] and (time.time() - st["at"]) < routing.SYNC_TTL / 3
+        )
+        if still_fresh and db.get_meta(f"node_sync_hash:{node['id']}") == h:
             results[node["name"]] = True
             continue
         if await sync_node(node, node_users):
