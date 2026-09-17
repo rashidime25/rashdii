@@ -272,7 +272,8 @@ def node_has_user(node, uid: str) -> tuple:
 
 
 def has_credential(node) -> bool:
-    return bool((node or {}).get("token")) or bool(config.NODE_SECRET)
+    from . import nodes as nodesync      # local import: nodes imports this module
+    return bool((node or {}).get("token")) or bool(nodesync.panel_secret(create=False))
 
 
 def raw_allowed(node, protocol: str, security: str) -> tuple:
