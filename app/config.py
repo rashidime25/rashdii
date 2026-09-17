@@ -96,6 +96,16 @@ def _panel_hosts() -> list:
     return ["0.0.0.0", "::"] if _ipv6_available() else ["0.0.0.0"]
 
 
+#: Panel settings that were once stored but are no longer supported. A row in
+#: the DB would keep being echoed by GET /api/settings (and shown in the UI) even
+#: though nothing reads it any more, so it is dropped once at boot - a revert
+#: that leaves ghosts behind is not a revert.
+RETIRED_SETTINGS = (
+    "reality_server_names", "sock_tfo", "sock_nodelay", "sock_keepalive",
+    "sock_user_timeout", "sock_congestion", "xhttp_mode", "xhttp_padding",
+    "xhttp_max_post", "xhttp_xmux", "link_test_target",
+)
+
 PANEL_BIND_HOSTS = _panel_hosts()
 #: The primary address, for logs/health payloads (the full list is above).
 PANEL_HOST = PANEL_BIND_HOSTS[0]
@@ -274,32 +284,12 @@ DEFAULT_SETTINGS = {
     "reality_sid": "",
     "reality_sni": "",
     "reality_dest": "",
-    # ---- config builder: engine tuning (see app/xray.py::_sockopt / xhttp) ----
-    # Extra SNI candidates advertised by the Reality inbound (comma separated).
-    # Each user may be pinned to one of them (users.reality_sni), so blocking a
-    # single name does not take everyone down.
-    "reality_server_names": "",
-    # TCP socket tuning. These are the knobs that change how fast a connection
-    # *feels* on a high-latency mobile network.
-    "sock_tfo": True,               # tcpFastOpen: saves a round trip on connect
-    "sock_nodelay": True,           # tcpNoDelay: no Nagle delay for small packets
-    "sock_keepalive": True,         # keep NAT (Iranian carriers) from dropping idle flows
-    "sock_user_timeout": 5000,      # tcpUserTimeout (ms), 0 = engine default
-    "sock_congestion": "",          # "" or "bbr" (VPS only; shared kernels ignore it)
-    "xhttp_mode": "auto",           # auto | packet-up | stream-up | stream-one
-    "xhttp_padding": "100-1000",    # random padding range, "" = off
-    "xhttp_max_post": 1000000,      # scMaxEachPostBytes
-    "xhttp_xmux": True,             # connection reuse → snappier browsing
-    "link_test_target": "https://www.gstatic.com/generate_204",
 }
 
 # Which Xray outbound tags are counted as "blocked" domains (for the routing
 # feature). Must match the tag names emitted in xray.py::generate_xray_config.
 BLOCKED_TAGS = {"block-ads", "block-iran", "block-adult", "block-custom"}
 
-# Values accepted by the settings API (anything else is rejected, not stored).
-VALID_SOCK_CONGESTION = {"", "bbr", "cubic"}
-VALID_XHTTP_MODES = {"auto", "packet-up", "stream-up", "stream-one"}
 # users.flow: "" (or "__inherit__") = use the panel default for that transport,
 # "none" = explicitly no flow (plain VLESS), otherwise the flow string itself.
 # The sentinel exists because every row created before this feature has ''.

@@ -111,7 +111,9 @@ def test_recipe_list_is_serialisable_and_complete(admin):
         for key in rec["fields"]:
             assert key in profiles.ALLOWED_FIELDS | profiles.SETTINGS_FIELDS
     assert any(p["level"] == 1 for p in data["plans"])
-    assert "auto" in data["xhttp_modes"]
+    # the panel-wide engine tuning was removed again on purpose: an engine knob
+    # that the panel no longer honours must not be advertised to the UI.
+    assert "xhttp_modes" not in data and "sock_congestion" not in data
 
 
 def test_create_with_recipe_stores_and_applies(make_user):
@@ -207,61 +209,38 @@ def test_bad_sni_is_rejected_not_stored(make_user):
     assert u["reality_sni"] == ""
 
 
-def test_settings_extra_server_names_feed_the_inbound(admin, make_user):
-    r = admin.post("/api/settings",
-                   json={"reality_server_names": "a.example.com, b.example.com;bad name"}, headers=H)
-    assert r.status_code == 200, r.text
-    assert r.json()["settings"]["reality_server_names"] == "a.example.com,b.example.com"
-    make_user(protocol="vless", transport="tcp", security="reality")
-    reality = next(ib for ib in _mod("xray").generate_xray_config()["inbounds"]
-                   if ib["tag"] == "in-vless-reality")
-    names = reality["streamSettings"]["realitySettings"]["serverNames"]
-    assert "a.example.com" in names and "b.example.com" in names
+def test_retired_engine_settings_are_gone_and_stay_gone(admin, make_user):
+    """The panel-wide tuning knobs were removed: POSTing them must change nothing.
 
-
-# --------------------------------------------------------------- 4) tuning
-def test_socket_tuning_on_tcp_inbounds_only(admin, make_user):
-    admin.post("/api/settings", json={"sock_tfo": True, "sock_nodelay": True,
-                                      "sock_keepalive": True, "sock_user_timeout": 5000},
-               headers=H)
-    make_user(protocol="vless", transport="ws", security="tls")
-    make_user(protocol="hysteria2", transport="udp", security="tls")
-    cfg = _mod("xray").generate_xray_config()
-    ws = next(ib for ib in cfg["inbounds"] if ib["tag"] == "in-vless-ws")
-    so = ws["streamSettings"]["sockopt"]
-    assert so["tcpFastOpen"] is True and so["tcpNoDelay"] is True
-    assert so["tcpUserTimeout"] == 5000 and so["tcpKeepAliveIdle"] == 30
-    for ib in cfg["inbounds"]:
-        ss = ib.get("streamSettings") or {}
-        if ss.get("network") in ("hysteria", "quic", "kcp"):
-            assert "sockopt" not in ss, "UDP transports must not get TCP socket options"
-
-
-def test_xhttp_settings_follow_the_panel(admin, make_user):
-    admin.post("/api/settings", json={"xhttp_mode": "stream-one", "xhttp_padding": "64-512",
-                                      "xhttp_max_post": 250000, "xhttp_xmux": True}, headers=H)
-    make_user(protocol="vless", transport="xhttp", security="tls")
-    cfg = _mod("xray").generate_xray_config()
-    xs = next(ib for ib in cfg["inbounds"] if ib["tag"] == "in-vless-xhttp")["streamSettings"]["xhttpSettings"]
-    assert xs["mode"] == "stream-one"
-    assert xs["extra"]["xPaddingBytes"] == "64-512"
-    assert xs["extra"]["scMaxEachPostBytes"] == 250000
-    assert xs["xmux"]["maxConcurrency"] == "16-32"
-
-
-def test_settings_reject_garbage(admin):
+    They used to be accepted, stored and shown; a revert that keeps echoing them
+    (or keeps honouring half of them) would be worse than never having had them.
+    """
     before = admin.get("/api/settings", headers=H).json()
-    r = admin.post("/api/settings", json={"xhttp_mode": "turbo", "xhttp_padding": "abc",
-                                          "sock_congestion": "warp-drive",
-                                          "sock_user_timeout": -5, "reality_server_names": "bad name"},
-                   headers=H)
+    retired = ("sock_tfo", "sock_nodelay", "sock_keepalive", "sock_user_timeout",
+               "sock_congestion", "xhttp_mode", "xhttp_padding", "xhttp_max_post",
+               "xhttp_xmux", "reality_server_names", "link_test_target")
+    r = admin.post("/api/settings", json={k: "yes" for k in retired}, headers=H)
     assert r.status_code == 200
     after = r.json()["settings"]
-    assert after["xhttp_mode"] == before["xhttp_mode"]
-    assert after["xhttp_padding"] == before["xhttp_padding"]
-    assert after["sock_congestion"] == before["sock_congestion"]
-    assert after["sock_user_timeout"] == before["sock_user_timeout"]
-    assert after["reality_server_names"] == ""
+    for key in retired:
+        assert key not in after, f"{key} is still accepted and echoed"
+        assert key not in before
+    assert config_retired() == set(retired)      # and they are queued for deletion
+
+
+def config_retired() -> set:
+    return set(__import__("app.config", fromlist=["app"]).RETIRED_SETTINGS)
+
+
+def test_xhttp_inbound_is_back_to_the_engine_defaults(make_user):
+    make_user(protocol="vless", transport="xhttp", security="tls")
+    ss = next(ib for ib in _mod("xray").generate_xray_config()["inbounds"]
+              if ib["tag"] == "in-vless-xhttp")["streamSettings"]
+    assert ss["xhttpSettings"] == {"path": "/xhttp"}       # no mode/padding/xmux
+    # and no panel-injected socket tuning on any TCP inbound
+    for ib in _mod("xray").generate_xray_config()["inbounds"]:
+        inner = ib.get("streamSettings") or {}
+        assert "sockopt" not in inner, f"{ib['tag']} still carries panel sockopt"
 
 
 def test_policy_levels_only_for_used_plans(make_user):

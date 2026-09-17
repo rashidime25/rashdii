@@ -160,7 +160,7 @@ def _port_of(ib: dict) -> int:
 def test_user(user: dict, settings: dict, xray_cfg: dict | None = None,
               target: str | None = None, host: str = "127.0.0.1") -> dict:
     """Run the whole check. Never raises: the caller stores the report."""
-    target = target or settings.get("link_test_target") or DEFAULT_TARGET
+    target = target or DEFAULT_TARGET
     report: dict = {"uid": user.get("uid"), "name": user.get("name"), "target": target,
                     "steps": [], "ok": False}
 

@@ -80,56 +80,13 @@ def xray_running() -> bool:
     return bool(_xray_process and _xray_process.poll() is None)
 
 
-# ------------------------------------------------------- engine tuning helpers
-def _sockopt(settings: dict) -> dict:
-    """Socket-level tuning shared by every TCP-ish inbound.
-
-    These change how a connection *feels* on a high-latency mobile network: TFO
-    saves a round trip, NoDelay removes Nagle's delay for small packets, and
-    keep-alive stops carrier NAT from silently dropping idle flows. Only keys
-    this engine build accepts are emitted — an unknown key makes Xray refuse
-    the whole config, and a refused config is every user offline.
-    """
-    so = {}
-    if settings.get("sock_tfo"):
-        so["tcpFastOpen"] = True
-    if settings.get("sock_nodelay"):
-        so["tcpNoDelay"] = True
-    if settings.get("sock_keepalive"):
-        so["tcpKeepAliveIdle"] = 30
-        so["tcpKeepAliveInterval"] = 10
-    try:
-        ut = int(settings.get("sock_user_timeout") or 0)
-    except (TypeError, ValueError):
-        ut = 0
-    if ut > 0:
-        so["tcpUserTimeout"] = ut
-    cong = str(settings.get("sock_congestion") or "").strip().lower()
-    if cong:
-        so["tcpCongestion"] = cong
-    return so
-
-
 def _xhttp_settings(settings: dict) -> dict:
-    """XHTTP transport settings (path + mode + optional tuning)."""
-    xs = {"path": "/xhttp", "mode": str(settings.get("xhttp_mode") or "auto")}
-    extra = {}
-    pad = str(settings.get("xhttp_padding") or "").strip()
-    if pad:
-        extra["xPaddingBytes"] = pad
-    try:
-        mx = int(settings.get("xhttp_max_post") or 0)
-    except (TypeError, ValueError):
-        mx = 0
-    if mx > 0:
-        extra["scMaxEachPostBytes"] = mx
-    if extra:
-        xs["extra"] = extra
-    if settings.get("xhttp_xmux"):
-        # Reusing the established POST stream is what makes browsing feel
-        # instant; these are the upstream sample values.
-        xs["xmux"] = {"maxConcurrency": "16-32", "hKeepAlivePeriod": 30}
-    return xs
+    """XHTTP transport settings: the path, which is all this panel pins.
+
+    The panel-wide mode/padding/post-size knobs were removed (they are the
+    engine's own defaults again); per-user tuning lives on the user, not here.
+    """
+    return {"path": "/xhttp"}
 
 
 def _policy(users: list, settings: dict) -> dict:
@@ -162,37 +119,15 @@ def _policy(users: list, settings: dict) -> dict:
     }
 
 
-def _apply_stream_tuning(inbounds: list, settings: dict) -> None:
-    """Attach the socket tuning to every TCP-based inbound, in place.
-
-    UDP transports (Hysteria2/QUIC) have no TCP socket, and the API inbound has
-    no streamSettings at all, so both are skipped.
-    """
-    so = _sockopt(settings)
-    if so:
-        for ib in inbounds:
-            ss = ib.get("streamSettings")
-            if not isinstance(ss, dict):
-                continue
-            if ss.get("network") in ("kcp", "quic"):
-                continue
-            ss["sockopt"] = dict(so)
-    return inbounds
-
-
 def _reality_identity(users: list, settings: dict) -> tuple:
     """(serverNames, shortIds) for the shared Reality inbound.
 
-    One Reality inbound serves everybody, so its identity is assembled from
-    three places: the panel default, the admin's extra SNI list, and each
-    user's own SNI/shortId. Keeping the per-user values inside the shared
-    inbound is what makes "rotate one user's SNI" or "block one user" possible
-    without disturbing anyone else.
+    One Reality inbound serves everybody, so its identity is assembled from the
+    panel default and each user's own SNI/shortId. Keeping the per-user values
+    inside the shared inbound is what makes "rotate one user's SNI" or "block
+    one user" possible without disturbing anyone else.
     """
     snis = {config.REALITY_SNI, (settings.get("reality_sni") or "").strip()}
-    for extra in str(settings.get("reality_server_names") or "").split(","):
-        if extra.strip():
-            snis.add(extra.strip())
     short_ids = set()
     panel_sid = (db.get_meta("reality_sid") or "").strip()
     if panel_sid:
@@ -640,7 +575,7 @@ def generate_xray_config() -> dict:
         # statsUserOnline feeds `xray api statsonline(iplist)` — the only way
         # to know who is really connected (state.ACTIVE never was populated).
         "policy": _policy(users, settings),
-        "inbounds": _apply_stream_tuning(inbounds, settings),
+        "inbounds": inbounds,
         "outbounds": outbounds,
         "routing": {"rules": routing_rules},
     }

@@ -1,4 +1,4 @@
-/* TiTaN — config builder UI (recipes, engine tuning, link test).
+/* TiTaN — config builder UI (recipes, link test).
  *
  * Deliberately additive: this file never rewrites the dashboard's markup, never
  * re-renders a section, and never touches the sidebar/tab logic. It only:
@@ -249,53 +249,14 @@
   }
 
   // ---------------------------------------------------------------- 3) workshop
-  var TUNING = [
-    { key: 'sock_tfo', label: 'TCP Fast Open', type: 'bool', hint: 'یک رفت‌وبرگشت کمتر در هر اتصال' },
-    { key: 'sock_nodelay', label: 'TCP NoDelay', type: 'bool', hint: 'حذف تأخیر Nagle برای پکت‌های کوچک' },
-    { key: 'sock_keepalive', label: 'Keep-Alive', type: 'bool', hint: 'جلوگیری از قطع اتصال بی‌کار توسط اپراتور' },
-    { key: 'sock_user_timeout', label: 'User Timeout (ms)', type: 'num', hint: '۰ = پیش‌فرض موتور' },
-    { key: 'sock_congestion', label: 'Congestion', type: 'select', options: ['', 'bbr', 'cubic'], hint: 'روی هسته‌های اشتراکی معمولاً بی‌اثر است' },
-    { key: 'xhttp_mode', label: 'حالت XHTTP', type: 'select', options: ['auto', 'packet-up', 'stream-up', 'stream-one'] },
-    { key: 'xhttp_padding', label: 'Padding', type: 'text', hint: 'مثال: 100-1000' },
-    { key: 'xhttp_max_post', label: 'Max POST bytes', type: 'num' },
-    { key: 'xhttp_xmux', label: 'xmux (استفاده مجدد اتصال)', type: 'bool' },
-    { key: 'reality_server_names', label: 'SNIهای اضافی Reality', type: 'text', hint: 'با کاما جدا کن؛ هر کاربر می‌تواند یکی را انتخاب کند' },
-    { key: 'link_test_target', label: 'مقصد تست اتصال', type: 'text', hint: 'آدرسی که تست لینک از روی سرور می‌گیرد' }
-  ];
-
-  function tuningRow(item, settings) {
-    var val = settings[item.key];
-    var id = 'cb_set_' + item.key;
-    if (item.type === 'bool') {
-      return '<div class="toggle-row"><span>' + esc(item.label) +
-        (item.hint ? ' <span class="muted" style="font-size:10px">' + esc(item.hint) + '</span>' : '') +
-        '</span><input type="checkbox" id="' + id + '" ' + (val ? 'checked' : '') +
-        ' style="accent-color:#8b5cf6;width:38px;height:20px"></div>';
-    }
-    if (item.type === 'select') {
-      return '<div class="field" style="margin-top:10px"><label>' + esc(item.label) + '</label><select id="' + id + '">' +
-        item.options.map(function (o) {
-          return '<option value="' + esc(o) + '" ' + (String(val == null ? '' : val) === o ? 'selected' : '') + '>' +
-            esc(o || '—') + '</option>';
-        }).join('') + '</select></div>';
-    }
-    return '<div class="field" style="margin-top:10px"><label>' + esc(item.label) + '</label><input id="' + id +
-      '" value="' + esc(val == null ? '' : val) + '" dir="ltr"></div>';
-  }
-
   function renderWorkshop() {
     var host = document.getElementById('cb-workshop');
     if (!host || host.dataset.cbFilled === '1') return;
     host.dataset.cbFilled = '1';
     host.innerHTML =
       '<div class="card-title" style="margin-bottom:12px"><h3 style="margin:0">کارگاه کانفیگ</h3>' +
-      '<span class="muted">پروفایل آماده + تنظیم دقیق موتور</span></div>' +
-      '<div id="cb-recipes" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px"></div>' +
-      '<details style="margin-top:14px;border-top:1px solid rgba(151,116,255,.16);padding-top:12px">' +
-      '<summary style="cursor:pointer;font-size:12px;color:#cbb8ff">تنظیم موتور (Sockopt / XHTTP / تست لینک)</summary>' +
-      '<div id="cb-tuning" style="margin-top:12px"></div>' +
-      '<div class="section-actions" style="margin-top:14px"><button class="section-btn primary" id="cb-save">ذخیره تنظیم موتور</button>' +
-      '<button class="section-btn" id="cb-reload">بازخوانی از سرور</button></div></details>';
+      '<span class="muted">پروفایل آماده</span></div>' +
+      '<div id="cb-recipes" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px"></div>';
 
     loadRecipes().then(function (data) {
       var box = document.getElementById('cb-recipes');
@@ -311,14 +272,6 @@
       wireRecipeButtons(box);
     });
 
-    loadTuning();
-
-    document.getElementById('cb-save').addEventListener('click', saveTuning);
-    document.getElementById('cb-reload').addEventListener('click', function () {
-      host.dataset.cbFilled = '0';
-      renderWorkshop();
-      toast('از سرور بازخوانی شد');
-    });
   }
 
   function wireRecipeButtons(box) {
@@ -336,28 +289,6 @@
         sel.dispatchEvent(new Event('change'));
       }, 120);
     });
-  }
-
-  function loadTuning() {
-    api('/api/settings').then(function (settings) {
-      var box = document.getElementById('cb-tuning');
-      if (!box) return;
-      box.innerHTML = TUNING.map(function (t) { return tuningRow(t, settings); }).join('');
-    }).catch(function (err) { toast(err.message); });
-  }
-
-  function saveTuning() {
-    var payload = {};
-    TUNING.forEach(function (t) {
-      var node = document.getElementById('cb_set_' + t.key);
-      if (!node) return;
-      if (t.type === 'bool') payload[t.key] = node.checked;
-      else if (t.type === 'num') payload[t.key] = parseInt(node.value, 10) || 0;
-      else payload[t.key] = node.value;
-    });
-    api('/api/settings', { method: 'POST', body: payload }).then(function () {
-      toast('تنظیم موتور ذخیره شد — کانفیگ بازنویسی می‌شود');
-    }).catch(function (err) { toast(err.message); });
   }
 
   // ---------------------------------------------------------------- bootstrap
