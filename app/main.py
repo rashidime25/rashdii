@@ -314,6 +314,10 @@ def _user_endpoint(u: dict, request: Request | None) -> tuple[str, int]:
                 if p.isdigit():
                     raw, port = name, int(p)
             host = raw.strip("[]") or None
+            if config.EDGE_HTTP_ONLY and _edge_only_host(host) and not _link_explicit_port(node):
+                # A Railway node's own port in the address is its *internal*
+                # port; from outside only its HTTPS edge answers.
+                port = _link_port(settings)
     if host is None:
         host = _public_host(request)
         port = _link_port(settings)
@@ -334,14 +338,169 @@ def _user_endpoint(u: dict, request: Request | None) -> tuple[str, int]:
             # Single-port fallback: VLESS(TCP+TLS) is served on the fallback port.
             port = config.FALLBACK_PORT
         else:
-            port = _tcp_port(proto, sec)
+            raw_port = _tcp_port(proto, sec)
+            proxy = config.tcp_proxy()
+            if _user_is_remote(u):
+                # The node's own address already decided the port above. A real
+                # VPS host without an explicit port is assumed to publish the
+                # standard raw ports; an edge-only node never reaches this branch
+                # because _edge_link_view remapped its transport.
+                if not _link_explicit_port(_node_for_user(u)):
+                    port = raw_port
+            elif proxy:
+                # A platform TCP proxy is the only route to a raw port. It is
+                # shared by the whole service, so it is advertised for the panel's
+                # own links only.
+                host, port = proxy
+            elif config.EDGE_HTTP_ONLY:
+                # The edge accepts these ports and never answers them, so a link
+                # with one hangs until the client's timeout. Keep the edge host
+                # and the edge port; the transport is mapped in _edge_link_view.
+                port = _link_port(settings)
+            else:
+                port = raw_port
     return host, port
+
+
+def _edge_link_view(u: dict) -> tuple[dict, list]:
+    """(user-as-it-must-be-linked, warnings) for an HTTP-only edge.
+
+    Keeping the *stored* user untouched matters: the admin's choice stays in the
+    database, and the moment a TCP proxy (or a non-edge deployment) exists the
+    original transport is what gets advertised again. What must never happen is
+    handing a client a link that cannot work.
+    """
+    warnings = []
+    local_edge = (not config.IS_NODE) and config.EDGE_HTTP_ONLY
+    remote = _user_is_remote(u)
+    # A node behind an HTTP edge has the same constraint as the panel itself: a
+    # link that dials a raw port there hangs exactly like it does here.
+    if remote:
+        node = _node_for_user(u)
+        node_host = _node_link_host(node) if node else ""
+        if not _edge_only_host(node_host):
+            return dict(u), warnings        # a real host: raw ports may be fine
+    elif not local_edge:
+        return dict(u), warnings
+    if config.tcp_proxy() and not remote:
+        return dict(u), warnings            # raw TCP is reachable through it
+    proto = (u.get("protocol") or "vless").lower()
+    transport = (u.get("transport") or "ws").lower()
+    security = (u.get("security") or "tls").lower()
+    if transport in config.EDGE_TRANSPORTS and security in ("tls", "none"):
+        return dict(u), warnings
+    mapped = dict(u)
+    if proto in ("vless", "vmess", "trojan"):
+        # XHTTP is the closest thing to a "raw" feel that an HTTP edge can carry:
+        # it is a normal POST stream, and it survives DPI better than WS.
+        mapped["transport"] = "xhttp" if proto in ("vless", "vmess") else "ws"
+        mapped["security"] = "tls"
+        mapped["flow"] = "" if mapped.get("flow") == "__inherit__" else mapped.get("flow", "")
+        warnings.append(
+            f"{transport or 'raw'} is unreachable through an HTTP-only edge; "
+            f"the link uses {mapped['transport']}+tls on the edge instead")
+    else:
+        warnings.append(
+            f"{proto} cannot traverse an HTTP edge: it needs a TCP/UDP proxy "
+            f"(Railway -> Settings -> Networking -> TCP Proxy) or a node")
+    return mapped, warnings
+
+
+#: Hosts that are known to be an HTTP-only edge: a Railway public domain is the
+#: service's HTTPS edge, and its raw ports answer nothing (measured).
+_EDGE_HOST_SUFFIXES = (".up.railway.app", ".railway.app", ".railway.internal")
+
+
+def _link_explicit_port(node) -> bool:
+    """True when a node's address carries a port the admin set on purpose.
+
+    For a Railway node the port in the address is the container's internal one
+    (443 in the deploy log), which is not reachable from outside - only its
+    HTTPS edge is. A plain VPS address with a port is the opposite: the port is
+    the exposed one, so it must be kept.
+    """
+    if _edge_only_host(_node_link_host(node)):
+        return False
+    return _node_host_port(node)[1] is not None
+
+
+def _node_for_user(u: dict):
+    """The remote node that will serve ``u``, or None."""
+    if config.IS_NODE:
+        return None
+    nid = nodesync.user_node_id(u)
+    if nid == 0:
+        return _auto_node()
+    return db.get_node(nid) if u.get("node_id") else None
+
+
+def _target_allows_raw_transport(node_id) -> bool:
+    """True when the user's node is a real host with an exposed port.
+
+    The edge constraint belongs to the *target*, not to the panel: a user sent to
+    a VPS node that publishes its raw port may absolutely use Reality, and being
+    created from a Railway panel must not take that away.
+    """
+    try:
+        nid = db.coerce_node_id(node_id)
+    except Exception:  # noqa: BLE001
+        return False
+    if not nid:
+        return False
+    node = db.get_node(nid)
+    if not node or node.get("is_local"):
+        return False
+    return _link_explicit_port(node) and not _edge_only_host(_node_link_host(node))
+
+
+def _node_host_port(node) -> tuple:
+    """(host, port) parsed out of a node's stored address.
+
+    The address is stored with a scheme ("https://203.0.113.9:8443"), so parsing
+    it as a URL is the only reliable way: counting colons gets the scheme's colon
+    wrong and silently disables every decision made from it.
+    """
+    from urllib.parse import urlsplit
+
+    raw = ((node or {}).get("address") or "").strip()
+    if not raw:
+        return "", None
+    if "://" not in raw:
+        raw = "//" + raw
+    try:
+        parts = urlsplit(raw)
+        port = parts.port
+    except ValueError:
+        return "", None
+    return (parts.hostname or ""), port
+
+
+def _node_link_host(node) -> str:
+    """The bare host of a node's address (its stored port, if any, is dropped)."""
+    return _node_host_port(node)[0]
+
+
+def _edge_only_host(host: str) -> bool:
+    """True when ``host`` is (almost certainly) an HTTP-only edge."""
+    h = (host or "").strip().lower()
+    if not h:
+        return False
+    return any(h == sfx.lstrip(".") or h.endswith(sfx) for sfx in _EDGE_HOST_SUFFIXES)
+
+
+def _link_host_for(u: dict, request: Request | None) -> str:
+    """Just the host a user's link will point at (no port), for decisions."""
+    try:
+        return _user_endpoint(u, request)[0]
+    except Exception:  # noqa: BLE001 - never break link generation over this
+        return ""
 
 
 def _links_for(u: dict, request: Request | None) -> dict:
     """Build a user's links (handles WireGuard server-pub resolution)."""
     u = _ensure_wg_user(u)
     settings = db.get_settings()
+    u, _edge_warnings = _edge_link_view(u)
     host, port = _user_endpoint(u, request)
     # A panel-wide sni_override (e.g. a CDN domain) only makes sense for the
     # main panel's own TLS. A link that dials a remote node must present that
@@ -434,6 +593,9 @@ def _serialize_user(u: dict, with_links: bool = False, request: Request | None =
     out["used_gb"] = round(out["status"]["used"] / (1024 ** 3), 3)
     out["quota_gb"] = round((u.get("quota_bytes") or 0) / (1024 ** 3), 3)
     out["avatar_url"] = _resolve_avatar(u.get("avatar") or "")["url"]
+    _, edge_warnings = _edge_link_view(u)
+    if edge_warnings:
+        out["edge_warnings"] = edge_warnings
     if with_links and request is not None:
         links = _links_for(u, request)
         panel_host = _public_host(request)
@@ -1025,6 +1187,7 @@ async def api_create_user(request: Request, _: str = Depends(_require_auth)):
         protocol,
         payload.get("transport") or settings.get("default_transport", "ws"),
         payload.get("security", "tls"),
+        raw_ok=_target_allows_raw_transport(payload.get("node_id")),
     )
     ss_method = (
         payload.get("ss_method")
@@ -1174,6 +1337,7 @@ async def api_update_user(uid: str, request: Request, _: str = Depends(_require_
             proto,
             fields.get("transport", user.get("transport", "ws")),
             fields.get("security", user.get("security", "tls")),
+            raw_ok=_target_allows_raw_transport(fields.get("node_id", user.get("node_id"))),
         )
         fields["transport"], fields["security"] = t, s
     if "fingerprint" in fields and fields["fingerprint"] not in config.VALID_FINGERPRINTS:
@@ -1305,6 +1469,90 @@ async def api_user_wireguard_conf(uid: str, request: Request, _: str = Depends(_
     )
 
 
+@app.get("/api/edge-check")
+async def api_edge_check(request: Request, _: str = Depends(_require_auth)):
+    """Prove which transports this deployment can actually serve.
+
+    The panel asks *itself* through nginx (the same path a client's packet takes
+    after the edge), per transport, and reports what came back. On an HTTP-only
+    edge the raw ports are dead by construction, and that verdict is included -
+    this is the check that turns "the config times out" into a named cause.
+    """
+    import httpx
+
+    settings = db.get_settings()
+    host = _public_host(request)
+    port = _link_port(settings)
+    checks = {
+        "vless+ws": ("/vl-ws", {"Connection": "Upgrade", "Upgrade": "websocket",
+                                "Sec-WebSocket-Version": "13",
+                                "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="}),
+        "vmess+ws": ("/vm-ws", {"Connection": "Upgrade", "Upgrade": "websocket",
+                                "Sec-WebSocket-Version": "13",
+                                "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="}),
+        "trojan+ws": ("/tr-ws", {"Connection": "Upgrade", "Upgrade": "websocket",
+                                 "Sec-WebSocket-Version": "13",
+                                 "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="}),
+        "vless+xhttp": ("/xhttp", {"Content-Type": "application/octet-stream"}),
+        "vless+httpupgrade": ("/hup", {"Connection": "Upgrade", "Upgrade": "websocket"}),
+        "vless+grpc": ("/titan", {"Content-Type": "application/grpc"}),
+    }
+    results = {}
+
+    def _nginx_in_front() -> bool:
+        """True when something in front of the panel forwards to us (nginx does:
+        it adds X-TiTaN-Listen-Port, which the panel echoes as edge_port)."""
+        for port in (config.PUBLIC_PORT, config.PANEL_PORT):
+            try:
+                r = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=3.0)
+                if r.status_code == 200 and r.json().get("edge_port"):
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
+    def _probe(path: str, headers: dict) -> tuple:
+        # Local nginx is the same hop the edge forwards to; when nginx is absent
+        # the panel serves the port itself, so the same URL still works.
+        for url in (f"http://127.0.0.1:{config.PUBLIC_PORT}{path}",
+                    f"http://127.0.0.1:{config.PANEL_PORT}{path}"):
+            try:
+                method = "POST" if path == "/xhttp" else "GET"
+                r = httpx.request(method, url, headers=headers, timeout=4.0,
+                                  content=b"\x00" if method == "POST" else None)
+                # Xray answers 400/415 to a bogus handshake: that is *alive*.
+                return r.status_code, len(r.content)
+            except Exception as exc:  # noqa: BLE001
+                last = str(exc)[:80]
+        return 0, last
+
+    in_front = _nginx_in_front()
+    for name, (path, headers) in checks.items():
+        code, extra = _probe(path, headers)
+        alive = code in (200, 400, 415, 426, 101)
+        detail = ""
+        if code == 0:
+            detail = ("nothing answered: the proxy in front of the panel is not "
+                      "running, so these paths cannot be served at all"
+                      if not in_front else "no answer from the upstream (inbound down?)")
+        results[name] = {"path": path, "status": code, "alive": alive, "detail": detail}
+    raw_ports = {name: getattr(config, name) for name in (
+        "XRAY_TCP_VLESS_PORT", "XRAY_TCP_VLESS_TLS_PORT", "XRAY_TCP_VLESS_REALITY_PORT",
+        "XRAY_TCP_VMESS_PORT", "XRAY_TCP_VMESS_TLS_PORT", "XRAY_TCP_TROJAN_PORT",
+        "XRAY_SS_PORT", "XRAY_SS_2022_PORT", "XRAY_HY2_PORT", "WG_PORT")}
+    return {
+        "ok": True,
+        "edge_http_only": config.EDGE_HTTP_ONLY,
+        "proxy_in_front": in_front,
+        "tcp_proxy": (lambda p: {"host": p[0], "port": p[1]} if p else None)(config.tcp_proxy()),
+        "public": {"host": host, "port": port},
+        "transports": results,
+        "raw_ports": raw_ports,
+        "note": ("an HTTP-only edge answers nothing on the raw ports; raw TCP needs "
+                 "a platform TCP proxy or a node that exposes them"),
+    }
+
+
 def _expire_from_days(days) -> float | None:
     d = int(days or 0)
     return (time.time() + d * 86400) if d > 0 else None
@@ -1319,7 +1567,8 @@ _SERVED_TRANSPORTS = {
 }
 
 
-def _normalize_protocol_fields(protocol: str, transport, security) -> tuple[str, str]:
+def _normalize_protocol_fields(protocol: str, transport, security,
+                               raw_ok: bool = False) -> tuple[str, str]:
     """Coerce transport/security to values the server can actually serve."""
     if protocol == "hysteria2":
         # Hysteria2 has no transport and is always TLS (QUIC).
@@ -1342,6 +1591,13 @@ def _normalize_protocol_fields(protocol: str, transport, security) -> tuple[str,
         s = "tls"
     if s == "reality" and t != "tcp":
         # Reality is only served over raw TCP
+        s = "tls"
+    if (t == "tcp" or s == "reality") and not raw_ok \
+            and config.EDGE_HTTP_ONLY and not config.tcp_proxy():
+        # The deployment has an HTTP-only edge and no TCP proxy: a raw transport
+        # here is a config that can never connect. Store a servable one instead
+        # of handing out a dead link (the admin sees the switch in the response).
+        t = "xhttp" if "xhttp" in allowed else ("ws" if "ws" in allowed else t)
         s = "tls"
     return t, s
 
