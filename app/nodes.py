@@ -16,12 +16,13 @@ domains around or keep a shared secret in sync.
 import hashlib
 import json
 import logging
+import os
 import secrets
 import time
 
 import httpx
 
-from . import config, db, routing
+from . import APP_VERSION, config, db, routing
 
 log = logging.getLogger("titan.nodes")
 
@@ -65,11 +66,110 @@ def _matches(a: str, b: str) -> bool:
     return bool(b) and secrets.compare_digest(str(a or ""), str(b))
 
 
+def node_credential() -> str:
+    """The credential this instance would accept a push with ("" = none yet).
+
+    Env first (``TITAN_NODE_SECRET`` / ``TITAN_NODE_TOKEN``), then whatever a
+    panel stored through ``/api/node/bootstrap``. A node deployed with no
+    variables at all has none, which is exactly the state the panel can fix
+    remotely instead of asking the admin to type variables into the service.
+    """
+    return str(config.NODE_SECRET or config.NODE_TOKEN or db.get_meta("node_secret") or "")
+
+
+def node_panel_url() -> str:
+    """The panel this node belongs to (env, or the URL stored on bootstrap)."""
+    return str(config.MAIN_URL or db.get_meta("node_panel_url") or "").rstrip("/")
+
+
+def store_node_credential(secret: str, panel_url: str = "") -> None:
+    """Persist a credential handed over by the panel (bootstrap)."""
+    db.set_meta("node_secret", secret)
+    if panel_url:
+        db.set_meta("node_panel_url", panel_url.rstrip("/"))
+    db.set_meta("node_claimed_at", str(time.time()))
+
+
+def identity() -> dict:
+    """Public identity card of this instance — no secret, ever.
+
+    A panel that was handed only a project domain needs to know three things
+    before it can usefully add this instance: that it really is TiTaN, where it
+    is, and whether it would accept a push. The first two are already visible
+    from outside (the URL answers, the edge port is probeable); the third is a
+    boolean. Nothing here is worth hiding, and hiding it would only push the
+    admin back to typing variables.
+    """
+    local = db.local_node() or {}
+    cred = node_credential()
+    kind = ("shared" if config.NODE_SECRET else
+            "token" if config.NODE_TOKEN else
+            "stored" if db.get_meta("node_secret") else "")
+    edge_scheme, edge_port = routing_host_port(local)
+    return {
+        "app": "titan",
+        "version": APP_VERSION,
+        "role": "node" if config.IS_NODE else "main",
+        "name": _own_name(local),
+        "city": local.get("city") or "",
+        "country": local.get("country") or "",
+        "country_code": (local.get("country_code") or "").upper(),
+        "flag": local.get("flag") or "🌐",
+        "url": config.NODE_URL or "",
+        "edge": {"scheme": edge_scheme, "port": edge_port},
+        "raw_ports": routing.raw_report(1) if config.IS_NODE else {},
+        "credential": kind,                 # "" = this node has nothing yet
+        "accepts_bootstrap": not cred,
+        "claimed_at": float(db.get_meta("node_claimed_at") or 0) or None,
+        "panel_url": node_panel_url(),
+        "users": len(db.list_users()),
+    }
+
+
+def _own_name(local: dict) -> str:
+    """A name the admin can recognise in the panel.
+
+    The local row is seeded as "سرور اصلی" on every boot, so that generic label
+    is never what a freshly added node should be called: an explicit
+    ``TITAN_NODE_NAME`` wins, then the Railway service name, then a name built
+    from the detected city, and only then the address.
+    """
+    explicit = str(getattr(config, "NODE_NAME", "") or "").strip()
+    if explicit:
+        return explicit[:64]
+    service = (os.environ.get("RAILWAY_SERVICE_NAME") or "").strip()
+    if service:
+        return service[:64]
+    stored = (local.get("name") or "").strip()
+    if stored and stored not in ("سرور اصلی", "TiTaN node"):
+        return stored[:64]
+    city = (local.get("city") or "").strip()
+    if city and city not in ("—", "Unknown"):
+        return f"TiTaN · {city}"[:64]
+    host = config.NODE_URL.replace("https://", "").replace("http://", "").split("/")[0]
+    return (host or ("TiTaN node" if config.IS_NODE else "TiTaN panel"))[:64]
+
+
+def routing_host_port(node: dict) -> tuple:
+    """Edge this instance answers on, tolerating an empty/partial node row."""
+    try:
+        from . import routing as _r
+        return _r.edge_scheme(node), _r.edge_port(node)
+    except Exception:  # noqa: BLE001
+        return ("https" if config.EDGE_HTTP_ONLY is False else "http"), config.PUBLIC_PORT
+
+
 def secret_valid_for_node(secret: str) -> bool:
-    """Node side: accept a sync push from the main panel."""
+    """Node side: accept a sync push from the main panel.
+
+    The stored credential counts too: a node that was claimed through
+    ``/api/node/bootstrap`` holds the secret in its database, not in its env.
+    """
     if _matches(secret, config.NODE_SECRET):
         return True
-    return _matches(secret, config.NODE_TOKEN)
+    if _matches(secret, config.NODE_TOKEN):
+        return True
+    return _matches(secret, db.get_meta("node_secret"))
 
 
 def secret_valid_for_main(secret: str) -> bool:

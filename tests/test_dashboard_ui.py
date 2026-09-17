@@ -72,6 +72,48 @@ def test_the_bridge_renders_icon_actions_and_luxury_cards():
     assert "const ICONS" in BRIDGE and BRIDGE.count("'<path") + BRIDGE.count("'<rect") >= 10
 
 
+def test_the_subscription_builder_and_node_detection_are_wired():
+    """The two flows the admin asked for, pinned where they can regress.
+
+    * A subscription link is *built*: the tab lists links, the modal offers every
+      user with the configs that user can contribute, and saving posts the pick.
+    * A node is added by its project domain: the modal can identify the domain,
+      and the setup modal copies every variable with a single button when the
+      node could not be claimed automatically.
+    """
+    assert "async function openSubBuilder(" in BRIDGE
+    assert "/api/subscriptions/catalog" in BRIDGE
+    for act in ('"data-act":"manage"', '"data-act":"copy"', '"data-act":"configs"'):
+        assert act in BRIDGE, f"{act} is not wired into the new tables"
+    assert "async function detectNode(" in BRIDGE and "/api/nodes/detect" in BRIDGE
+    assert "setupCopyAll" in BRIDGE and "setup.block" in BRIDGE
+    assert "'data-act':'claim'" in BRIDGE and "act==='claim'" in BRIDGE, \
+        "a node cannot be detected/claimed in one click"
+    assert "ساخت لینک اشتراک جدید" in DASHBOARD, "the subscriptions head has no new-link button"
+    for cls in (".sub-user", ".sub-chip", ".sub-summary", ".det-card", ".det-ok"):
+        assert cls in DASHBOARD, f"{cls} is not styled"
+
+
+def test_the_latency_advisor_measures_from_the_client():
+    """The ping that matters is client -> exit, which only a browser can measure.
+
+    The panel's own node cards show panel -> node latency; that number is not the
+    one a user feels. The advisor fires cache-busted no-store requests from the
+    admin's browser at the panel edge, every enabled node and Cloudflare's nearest
+    PoP, so the panel can tell which exit is actually closest to the admin.
+    """
+    assert "async function openLatencyAdvisor()" in BRIDGE
+    assert "async function rttBest(" in BRIDGE and "'no-store'" in BRIDGE
+    assert "cp.cloudflare.com/generate_204" in BRIDGE, "no Cloudflare floor to compare against"
+    assert "'no-cors'" in BRIDGE, "node probes must be cross-origin safe"
+    assert "x-railway-edge" in BRIDGE, "the serving region is not reported"
+    # the header's pulse button is the entry point, and it is not a text button
+    assert "data-act','advisor'" in BRIDGE
+    assert 'data-tip="پینگ‌سنج' in DASHBOARD
+    for cls in (".lat-row", ".lat-ms", ".lat-verdict", ".lat-custom"):
+        assert cls in DASHBOARD, f"{cls} is not styled"
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_the_bridge_renders_every_section():
     """Runs the real bridge against a stub DOM and a real API shape."""

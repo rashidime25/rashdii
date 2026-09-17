@@ -87,6 +87,18 @@ CREATE TABLE IF NOT EXISTS traffic_hourly (
     up     INTEGER NOT NULL DEFAULT 0,
     down   INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL DEFAULT 'Subscription',
+    token      TEXT UNIQUE NOT NULL,
+    items      TEXT NOT NULL DEFAULT '[]',
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    note       TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    hits       INTEGER NOT NULL DEFAULT 0,
+    last_used  REAL NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS nodes (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     name         TEXT NOT NULL,
@@ -579,6 +591,98 @@ def set_local_node_location(city: str, country: str, country_code: str, flag: st
             (city, country, country_code, flag),
         )
         c.commit()
+
+
+
+# ------------------------------------------------------------------- subscriptions
+def local_node() -> dict | None:
+    """The row that describes *this* process (seeded on first boot)."""
+    with _lock:
+        c = _connect()
+        row = c.execute("SELECT * FROM nodes WHERE is_local=1").fetchone()
+    return dict(row) if row else None
+
+
+def list_subscriptions() -> list[dict]:
+    with _lock:
+        c = _connect()
+        rows = c.execute("SELECT * FROM subscriptions ORDER BY id ASC").fetchall()
+    return [_sub_row(r) for r in rows]
+
+
+def get_subscription(sub_id: int) -> dict | None:
+    with _lock:
+        c = _connect()
+        row = c.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
+    return _sub_row(row) if row else None
+
+
+def get_subscription_by_token(token: str) -> dict | None:
+    if not token:
+        return None
+    with _lock:
+        c = _connect()
+        row = c.execute("SELECT * FROM subscriptions WHERE token=?", (token,)).fetchone()
+    return _sub_row(row) if row else None
+
+
+def create_subscription(name: str, token: str, items, note: str = "", enabled: bool = True) -> dict:
+    payload = json.dumps(items or [], ensure_ascii=False)
+    with _lock:
+        c = _connect()
+        cur = c.execute(
+            "INSERT INTO subscriptions(name, token, items, enabled, note, created_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (name, token, payload, 1 if enabled else 0, note, time.time()),
+        )
+        c.commit()
+        new_id = cur.lastrowid
+    return get_subscription(new_id) or {}
+
+
+def update_subscription(sub_id: int, fields: dict) -> dict | None:
+    allowed = {"name", "items", "enabled", "note", "token"}
+    sets, vals = [], []
+    for key, value in fields.items():
+        if key not in allowed:
+            continue
+        if key == "items":
+            value = json.dumps(value or [], ensure_ascii=False)
+        if key == "enabled":
+            value = 1 if value else 0
+        sets.append(f"{key}=?")
+        vals.append(value)
+    if sets:
+        vals.append(sub_id)
+        with _lock:
+            c = _connect()
+            c.execute(f"UPDATE subscriptions SET {', '.join(sets)} WHERE id=?", vals)
+            c.commit()
+    return get_subscription(sub_id)
+
+
+def delete_subscription(sub_id: int) -> bool:
+    with _lock:
+        c = _connect()
+        cur = c.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
+        c.commit()
+        return cur.rowcount > 0
+
+
+def touch_subscription(sub_id: int) -> None:
+    with _lock:
+        c = _connect()
+        c.execute("UPDATE subscriptions SET hits=hits+1, last_used=? WHERE id=?", (time.time(), sub_id))
+        c.commit()
+
+
+def _sub_row(row) -> dict:
+    d = dict(row)
+    try:
+        d["items"] = json.loads(d.get("items") or "[]")
+    except (TypeError, ValueError):
+        d["items"] = []
+    return d
 
 
 def backup_bytes() -> bytes:
