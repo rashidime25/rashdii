@@ -19,6 +19,35 @@ from app import config
 from conftest import REPO
 
 
+def _ipv6_available() -> bool:
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        s.bind(("::", 0))
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def test_panel_host_accepts_both_stacks():
+    """If we bind `::`, IPv4 connections must still work (v4-mapped).
+
+    This is the assumption the whole dual-stack decision rests on, so it is
+    checked against the kernel instead of being trusted.
+    """
+    if not _ipv6_available():
+        pytest.skip("no IPv6 in this environment")
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as srv:
+        srv.bind(("::", 0))
+        srv.listen(4)
+        port = srv.getsockname()[1]
+        for family, addr in ((socket.AF_INET, ("127.0.0.1", port)),
+                             (socket.AF_INET6, ("::1", port))):
+            with socket.socket(family, socket.SOCK_STREAM) as c:
+                c.settimeout(3)
+                c.connect(addr)                 # refused here means the bind is v6-only
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -44,11 +73,28 @@ class _Listener:
 
 # ------------------------------------------------------------------ the probe
 def test_the_panel_always_serves_panel_port():
-    """The bind is not a guess: entrypoint.sh decides, the app just obeys."""
+    """The bind is not a guess: entrypoint.sh decides the port, the app obeys it.
+
+    And it obeys it on *every* address family the kernel offers - a platform edge
+    that dials a family nobody listens on is exactly the outage this file exists
+    for (healthy container, "Application failed to respond" outside).
+    """
     src = pathlib.Path(REPO, "app", "main.py").read_text(encoding="utf-8")
     block = src[src.index('if __name__ == "__main__":'):]
     assert 'port=config.PANEL_PORT' in block, block[:400]
-    assert 'host="0.0.0.0"' in block, block[:400]
+    assert "config.PANEL_BIND_HOSTS" in block, "the listen set must come from config"
+    assert config.PANEL_BIND_HOSTS[0] == config.PANEL_HOST
+
+
+def test_panel_binds_both_families_when_the_kernel_has_ipv6():
+    expected = ["0.0.0.0", "::"] if _ipv6_available() else ["0.0.0.0"]
+    assert config.PANEL_BIND_HOSTS == expected
+
+
+def test_panel_host_env_replaces_the_bind_list(monkeypatch):
+    """An explicit PANEL_HOST must still mean exactly that, nothing more."""
+    monkeypatch.setenv("PANEL_HOST", "127.0.0.1")
+    assert config._panel_hosts() == ["127.0.0.1"]
 
 
 # ------------------------------------------------------------------ entrypoint
@@ -91,6 +137,11 @@ def test_entrypoint_points_nginx_at_the_panel_port_it_exports(container):
     proc, log, conf = _run(container, {"PORT": str(public), "PANEL_PORT": str(panel)})
     assert proc.returncode == 0, proc.stderr[-400:]
     assert f"listen {public};" in conf, conf[:400]
+    if _ipv6_available():
+        assert f"listen [::]:{public};" in conf, "the platform edge may reach us over IPv6"
+    else:
+        # a `listen [::]` line without a v6 stack is a fatal nginx error
+        assert "[::]" not in conf
     assert f"proxy_pass http://127.0.0.1:{panel}; # titan-panel-upstream" in conf
     assert f"python3 -m app.main PANEL_PORT={panel}" in log, log
     # the WS/xhttp/gRPC inbounds keep their own ports - only the marked line moves
@@ -108,6 +159,33 @@ def test_entrypoint_resolves_a_panel_port_that_collides_with_the_public_one(cont
     assert f"panel moved to {shifted}" in proc.stdout, proc.stdout[-400:]
     assert f"proxy_pass http://127.0.0.1:{shifted}; # titan-panel-upstream" in conf
     assert f"python3 -m app.main PANEL_PORT={shifted}" in log, log
+
+
+def test_entrypoint_listens_on_the_ports_an_edge_may_target(container):
+    """A platform edge can disagree with PORT; the panel must not be unreachable.
+
+    This is the exact failure that produced "Application failed to respond" while
+    the container was healthy on the inside: the edge was forwarding to a port
+    nobody listened on.
+    """
+    proc, _log, conf = _run(container, {"PORT": "8099"})
+    assert proc.returncode == 0, proc.stderr[-300:]
+    for candidate in ("443", "8080", "8000", "3000"):
+        assert f"listen {candidate};" in conf, f"{candidate} missing from the listen set"
+        if _ipv6_available():
+            assert f"listen [::]:{candidate};" in conf
+    # and never a port Xray or the panel already owns
+    for reserved in ("10000", "10001", "10004", "10009", "10085"):
+        assert f"listen {reserved};" not in conf, f"{reserved} must stay with Xray/the panel"
+    assert "panel listens on:" in proc.stdout
+
+
+def test_extra_listen_ports_can_be_turned_off(container):
+    """Once the platform's target port is pinned, the safety net is optional."""
+    proc, _log, conf = _run(container, {"PORT": "8097", "TITAN_EXTRA_LISTEN_PORTS": ""})
+    assert proc.returncode == 0, proc.stderr[-300:]
+    assert "listen 8097;" in conf
+    assert "listen 8080;" not in conf and "listen 443;" not in conf
 
 
 def test_entrypoint_defaults_when_the_platform_says_nothing(container):
