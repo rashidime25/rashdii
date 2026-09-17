@@ -40,6 +40,7 @@ from fastapi.templating import Jinja2Templates
 from . import APP_NAME, APP_VERSION, config, db, security, state, xray
 from . import nodes as nodesync
 from . import reality
+from . import routing
 from . import tasks as bg
 from . import wg
 from .colo_map import describe_colo
@@ -282,48 +283,48 @@ def _tcp_port(protocol: str, security: str) -> int:
     return config.XRAY_TCP_VLESS_PORT
 
 
-def _user_endpoint(u: dict, request: Request | None) -> tuple[str, int]:
+def _user_endpoint(u: dict, request: Request | None, plan: dict | None = None) -> tuple[str, int]:
     """The (host, port) a user's connection link should point at.
 
-    - On a node, every user is proxied by this process, so the link points at
-      the node's own public host.
-    - On the main panel, a user assigned to a remote node gets a link pointing
-      at that node's address; node_id=0 ("auto") resolves to the fastest node.
-    - Raw-TCP users get the dedicated TCP port for their protocol/security.
-    - Hysteria2/WireGuard get their dedicated UDP ports.
+    *Who* serves the user is decided once, in `routing.serving`, which is also
+    what `nodes.local_users` serves from — a link and the server behind it can
+    therefore never disagree. This function only turns that decision into an
+    address:
+
+    - **node**: the node's host. Edge transports use the port the node's own
+      probe answered on; raw transports use the fleet's raw port for the
+      protocol/security, never the port the admin typed in the node's address
+      (that one is the node's HTTP edge).
+    - **panel**: this process. Raw transports are reachable only through a
+      platform TCP proxy; without one they were already remapped by
+      `routing.edge_view`, so the edge port is the correct answer.
+    - Hysteria2/WireGuard keep their dedicated UDP ports on both.
     """
     settings = db.get_settings()
-    host = None
-    port = _link_port(settings)
-    nid = nodesync.user_node_id(u)
-    node = None
-    if config.IS_NODE:
-        host = _public_host(request)
+    plan = plan or routing.serving(u)
+    node = plan.get("node")
+    proto = (u.get("protocol") or "vless").lower()
+    sec = (u.get("security") or "none").lower()
+    transport = (u.get("transport") or "ws").lower()
+
+    # The port follows what the link will *advertise* (plan["transport"]), not
+    # what the row stores: a raw row remapped to XHTTP/TLS must carry the edge
+    # port, otherwise the client dials a raw port the target never opened.
+    advertised_t = (plan.get("transport") or transport).lower()
+    advertised_s = (plan.get("security") or sec).lower()
+    is_raw = routing.is_raw_transport(advertised_t, advertised_s)
+    if plan["target"] == "node" and node:
+        host = routing.link_host(node)
+        port = routing.edge_port(node)
+        if is_raw:
+            port = plan.get("raw_port") or routing.raw_port(proto, advertised_s)
     else:
-        if nid == 0:
-            node = _auto_node()
-        elif u.get("node_id"):
-            node = db.get_node(nid)
-        if node and not node.get("is_local") and (node.get("address") or "").strip():
-            raw = node["address"].strip()
-            raw = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", raw)
-            raw = raw.split("/", 1)[0].rsplit("@", 1)[-1].strip()
-            port = _link_port(settings)
-            if ":" in raw:
-                name, p = raw.rsplit(":", 1)
-                if p.isdigit():
-                    raw, port = name, int(p)
-            host = raw.strip("[]") or None
-            if config.EDGE_HTTP_ONLY and _edge_only_host(host) and not _link_explicit_port(node):
-                # A Railway node's own port in the address is its *internal*
-                # port; from outside only its HTTPS edge answers.
-                port = _link_port(settings)
-    if host is None:
         host = _public_host(request)
         port = _link_port(settings)
-    proto = (u.get("protocol") or "vless").lower()
-    transport = (u.get("transport") or "ws").lower()
-    sec = (u.get("security") or "none").lower()
+        proxy = config.tcp_proxy()
+        if proxy and is_raw:
+            host, port = proxy
+
     if proto == "wireguard":
         port = config.WG_PORT
     elif proto == "hysteria2":
@@ -333,82 +334,13 @@ def _user_endpoint(u: dict, request: Request | None) -> tuple[str, int]:
         method = (u.get("ss_method") or settings.get("ss_method")
                   or config.DEFAULT_SS_METHOD).lower()
         port = config.XRAY_SS_2022_PORT if method in config.SS_2022_METHODS else config.XRAY_SS_PORT
-    elif transport == "tcp":
-        if proto == "vless" and sec == "tls" and config.fallback_active():
-            # Single-port fallback: VLESS(TCP+TLS) is served on the fallback port.
-            port = config.FALLBACK_PORT
-        else:
-            raw_port = _tcp_port(proto, sec)
-            proxy = config.tcp_proxy()
-            if _user_is_remote(u):
-                # The node's own address already decided the port above. A real
-                # VPS host without an explicit port is assumed to publish the
-                # standard raw ports; an edge-only node never reaches this branch
-                # because _edge_link_view remapped its transport.
-                if not _link_explicit_port(_node_for_user(u)):
-                    port = raw_port
-            elif proxy:
-                # A platform TCP proxy is the only route to a raw port. It is
-                # shared by the whole service, so it is advertised for the panel's
-                # own links only.
-                host, port = proxy
-            elif config.EDGE_HTTP_ONLY:
-                # The edge accepts these ports and never answers them, so a link
-                # with one hangs until the client's timeout. Keep the edge host
-                # and the edge port; the transport is mapped in _edge_link_view.
-                port = _link_port(settings)
-            else:
-                port = raw_port
     return host, port
-
-
-def _edge_link_view(u: dict) -> tuple[dict, list]:
-    """(user-as-it-must-be-linked, warnings) for an HTTP-only edge.
-
-    Keeping the *stored* user untouched matters: the admin's choice stays in the
-    database, and the moment a TCP proxy (or a non-edge deployment) exists the
-    original transport is what gets advertised again. What must never happen is
-    handing a client a link that cannot work.
-    """
-    warnings = []
-    local_edge = (not config.IS_NODE) and config.EDGE_HTTP_ONLY
-    remote = _user_is_remote(u)
-    # A node behind an HTTP edge has the same constraint as the panel itself: a
-    # link that dials a raw port there hangs exactly like it does here.
-    if remote:
-        node = _node_for_user(u)
-        node_host = _node_link_host(node) if node else ""
-        if not _edge_only_host(node_host):
-            return dict(u), warnings        # a real host: raw ports may be fine
-    elif not local_edge:
-        return dict(u), warnings
-    if config.tcp_proxy() and not remote:
-        return dict(u), warnings            # raw TCP is reachable through it
-    proto = (u.get("protocol") or "vless").lower()
-    transport = (u.get("transport") or "ws").lower()
-    security = (u.get("security") or "tls").lower()
-    if transport in config.EDGE_TRANSPORTS and security in ("tls", "none"):
-        return dict(u), warnings
-    mapped = dict(u)
-    if proto in ("vless", "vmess", "trojan"):
-        # XHTTP is the closest thing to a "raw" feel that an HTTP edge can carry:
-        # it is a normal POST stream, and it survives DPI better than WS.
-        mapped["transport"] = "xhttp" if proto in ("vless", "vmess") else "ws"
-        mapped["security"] = "tls"
-        mapped["flow"] = "" if mapped.get("flow") == "__inherit__" else mapped.get("flow", "")
-        warnings.append(
-            f"{transport or 'raw'} is unreachable through an HTTP-only edge; "
-            f"the link uses {mapped['transport']}+tls on the edge instead")
-    else:
-        warnings.append(
-            f"{proto} cannot traverse an HTTP edge: it needs a TCP/UDP proxy "
-            f"(Railway -> Settings -> Networking -> TCP Proxy) or a node")
-    return mapped, warnings
 
 
 #: Hosts that are known to be an HTTP-only edge: a Railway public domain is the
 #: service's HTTPS edge, and its raw ports answer nothing (measured).
-_EDGE_HOST_SUFFIXES = (".up.railway.app", ".railway.app", ".railway.internal")
+#: Hosts that are known to be an HTTP-only edge live in `routing` (one place,
+#: because both the link and the serving decision depend on them).
 
 
 def _link_explicit_port(node) -> bool:
@@ -419,27 +351,24 @@ def _link_explicit_port(node) -> bool:
     HTTPS edge is. A plain VPS address with a port is the opposite: the port is
     the exposed one, so it must be kept.
     """
-    if _edge_only_host(_node_link_host(node)):
+    if routing.is_edge_only(routing.link_host(node)):
         return False
-    return _node_host_port(node)[1] is not None
+    return routing.address_port(node) is not None
 
 
 def _node_for_user(u: dict):
-    """The remote node that will serve ``u``, or None."""
-    if config.IS_NODE:
-        return None
-    nid = nodesync.user_node_id(u)
-    if nid == 0:
-        return _auto_node()
-    return db.get_node(nid) if u.get("node_id") else None
+    """The node whose link a user is *supposed* to use (before verification)."""
+    return routing.intended_node(u)
 
 
 def _target_allows_raw_transport(node_id) -> bool:
-    """True when the user's node is a real host with an exposed port.
+    """True when a raw transport can be stored for a user on this node.
 
     The edge constraint belongs to the *target*, not to the panel: a user sent to
     a VPS node that publishes its raw port may absolutely use Reality, and being
-    created from a Railway panel must not take that away.
+    created from a Railway panel must not take that away. A node whose raw port
+    the panel has *measured* closed is excluded, so the row never records a
+    transport that cannot connect.
     """
     try:
         nid = db.coerce_node_id(node_id)
@@ -450,79 +379,79 @@ def _target_allows_raw_transport(node_id) -> bool:
     node = db.get_node(nid)
     if not node or node.get("is_local"):
         return False
-    return _link_explicit_port(node) and not _edge_only_host(_node_link_host(node))
+    if not (node.get("address") or "").strip():
+        return False
+    if routing.is_edge_only(routing.link_host(node)):
+        return False
+    # Only the Reality/TCP family needs a raw port; ask about the strictest one.
+    state = routing.raw_state(node["id"], config.XRAY_TCP_VLESS_REALITY_PORT)
+    return state is not False
 
 
 def _node_host_port(node) -> tuple:
-    """(host, port) parsed out of a node's stored address.
-
-    The address is stored with a scheme ("https://203.0.113.9:8443"), so parsing
-    it as a URL is the only reliable way: counting colons gets the scheme's colon
-    wrong and silently disables every decision made from it.
-    """
-    from urllib.parse import urlsplit
-
-    raw = ((node or {}).get("address") or "").strip()
-    if not raw:
-        return "", None
-    if "://" not in raw:
-        raw = "//" + raw
-    try:
-        parts = urlsplit(raw)
-        port = parts.port
-    except ValueError:
-        return "", None
-    return (parts.hostname or ""), port
+    """(host, port) parsed out of a node's stored address (see routing)."""
+    return routing.host_port(node)
 
 
 def _node_link_host(node) -> str:
     """The bare host of a node's address (its stored port, if any, is dropped)."""
-    return _node_host_port(node)[0]
+    return routing.link_host(node)
 
 
 def _edge_only_host(host: str) -> bool:
     """True when ``host`` is (almost certainly) an HTTP-only edge."""
-    h = (host or "").strip().lower()
-    if not h:
-        return False
-    return any(h == sfx.lstrip(".") or h.endswith(sfx) for sfx in _EDGE_HOST_SUFFIXES)
+    return routing.is_edge_only(host)
 
 
-def _link_host_for(u: dict, request: Request | None) -> str:
-    """Just the host a user's link will point at (no port), for decisions."""
-    try:
-        return _user_endpoint(u, request)[0]
-    except Exception:  # noqa: BLE001 - never break link generation over this
-        return ""
+def _edge_link_view(u: dict) -> tuple[dict, list]:
+    """(user-as-it-must-be-linked, warnings) as decided by `routing`.
+
+    The stored row is never rewritten: the admin's choice stays in the database,
+    and the moment the target can serve it again (a node finishes syncing, a TCP
+    proxy appears) the original transport is what gets advertised.
+    """
+    plan = routing.serving(u)
+    return _apply_plan(u, plan), list(plan.get("warnings") or [])
 
 
 def _links_for(u: dict, request: Request | None) -> dict:
-    """Build a user's links (handles WireGuard server-pub resolution)."""
+    """Build a user's links (handles WireGuard server-pub resolution).
+
+    The target is decided **once** (`routing.serving`) and used for both the
+    address and the transport: recomputing it from the remapped row would let a
+    link point at a host that refused the mapped transport.
+    """
     u = _ensure_wg_user(u)
     settings = db.get_settings()
-    u, _edge_warnings = _edge_link_view(u)
-    host, port = _user_endpoint(u, request)
+    plan = routing.serving(u)
+    host, port = _user_endpoint(u, request, plan)
+    shown = _apply_plan(u, plan)
     # A panel-wide sni_override (e.g. a CDN domain) only makes sense for the
     # main panel's own TLS. A link that dials a remote node must present that
     # node's SNI, so drop the override there.
-    if _user_is_remote(u):
+    if plan["target"] == "node":
         settings = {**settings, "sni_override": ""}
-    server_pub = _wg_server_pub(u) if u.get("protocol") == "wireguard" else ""
-    return build_links(host, port, u, settings, server_pub=server_pub)
+    server_pub = _wg_server_pub(u, plan) if u.get("protocol") == "wireguard" else ""
+    return build_links(host, port, shown, settings, server_pub=server_pub)
+
+
+def _apply_plan(u: dict, plan: dict) -> dict:
+    """The row as the client must see it (stored row + the plan's transport)."""
+    shown = dict(u)
+    shown["transport"] = plan.get("transport") or u.get("transport") or ""
+    shown["security"] = plan.get("security") or u.get("security") or "tls"
+    if shown.get("flow") == "__inherit__" and shown["transport"] != (u.get("transport") or ""):
+        shown["flow"] = ""
+    return shown
 
 
 def _user_is_remote(u: dict) -> bool:
-    """True when the user's traffic is served by a remote node (not this
-    process), i.e. the link must point at another host."""
-    if config.IS_NODE:
-        return False
-    nid = nodesync.user_node_id(u)
-    node = None
-    if nid == 0:
-        node = _auto_node()
-    elif u.get("node_id"):
-        node = db.get_node(nid)
-    return bool(node and not node.get("is_local"))
+    """True when the link points at a node instead of this process.
+
+    Same decision the link is built from (`routing.serving`), so a user is never
+    "remote" for the link and local for the server, or the other way round.
+    """
+    return routing.serving(u)["target"] == "node"
 
 
 def _set_session(response: Response, username: str, remember: bool = False):
@@ -648,6 +577,45 @@ async def _local_latency() -> int | None:
     return ms
 
 
+#: A raw port is probed with a TCP connect: a node that does not publish it must
+#: never end up in a link (that link is exactly what "the config times out" is).
+_RAW_PROBE_TIMEOUT = 1.5
+
+
+async def _probe_raw_ports(node: dict) -> dict:
+    """TCP-connect the raw ports the users of ``node`` actually need.
+
+    Railway's edge accepts TCP on every port and then answers nothing, so a
+    connect alone is not proof of a working proxy — but a *refused or timed out*
+    connect is proof that the port is not published, and that is the case this
+    probe exists to catch (it is also what the panel reports per node).
+    """
+    host = routing.link_host(node)
+    if not host or routing.is_edge_only(host):
+        return {}
+    ports = set()
+    for u in db.list_users():
+        if nodesync.user_node_id(u) not in (node["id"], 0):
+            continue
+        if routing.is_raw_transport(u.get("transport") or "", u.get("security") or ""):
+            ports.add(routing.raw_port(u.get("protocol") or "vless", u.get("security") or "none"))
+    if not ports:
+        return {}
+
+    async def one(port: int):
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=_RAW_PROBE_TIMEOUT)
+            writer.close()
+            return port, True
+        except Exception:  # noqa: BLE001
+            return port, False
+
+    results = dict(await asyncio.gather(*[one(p) for p in sorted(ports)]))
+    routing.record_raw_probe(node["id"], results)
+    return results
+
+
 async def _node_status(node: dict) -> dict:
     """Compute live status for a node. Cached for 30s. Remote nodes are probed
     with a short timeout; callers should run these concurrently (gather) so a
@@ -659,6 +627,7 @@ async def _node_status(node: dict) -> dict:
 
     data = {"online": False, "latency_ms": None, "cpu": None, "ram": None, "disk": None,
             "users_count": None, "reason": ""}
+    scheme_used, port_used = "", 0
     if node.get("is_local"):
         data["online"] = True
         data["cpu"] = psutil.cpu_percent(interval=0.1)
@@ -692,6 +661,12 @@ async def _node_status(node: dict) -> dict:
                         lat = (time.time() - t0) * 1000
                     data["online"] = r.status_code in (200, 401, 404)
                     data["latency_ms"] = round(lat)
+                    host_part = body.rsplit(":", 1)
+                    scheme_used = scheme
+                    if len(host_part) == 2 and host_part[1].isdigit():
+                        port_used = int(host_part[1])
+                    else:
+                        port_used = 443 if scheme == "https://" else 80
                     if not data["online"]:
                         # e.g. 502/503 while the node app is starting or crashed
                         data["reason"] = f"http-{r.status_code}"
@@ -711,8 +686,16 @@ async def _node_status(node: dict) -> dict:
                     data["reason"] = type(e).__name__ or "error"
             if data["online"]:
                 data["reason"] = ""  # reached via a fallback scheme — healthy
+        if data["online"] and scheme_used and port_used:
+            # Links must carry the edge the node actually answered on, not the one
+            # the admin guessed, so the measurement is stored for `routing`.
+            routing.record_edge_probe(node["id"], scheme_used, port_used)
+        if not node.get("is_local"):
+            data["raw_open"] = await _probe_raw_ports(node)
     _node_status_cache[node["id"]] = {"ts": now, "data": data}
     _node_latency_snap[node["id"]] = data["latency_ms"]
+    if not node.get("is_local"):
+        routing.record_latency(node["id"], data["latency_ms"], data["online"])
     return data
 
 
@@ -722,15 +705,29 @@ def _serialize_node(node: dict, status: dict) -> dict:
     out["status"] = status
     out["version"] = APP_VERSION if node.get("is_local") else None
     if not node.get("is_local"):
-        # how many users this node should be serving vs how many it actually has
+        # how many users this node should be serving vs how many it actually has,
+        # and whether the panel has proof that it received them
         expected = sum(
             1 for u in db.list_users()
             if nodesync.user_node_id(u) in (node["id"], 0)
         )
+        sync = routing.sync_state(node["id"])
         out["sync"] = {
             "expected": expected,
             "on_node": status.get("users_count"),
             "has_credential": bool(node.get("token")) or bool(config.NODE_SECRET),
+            "ok": sync["ok"],
+            "at": sync["at"] or None,
+            "error": sync["err"],
+            "serving": sorted(sync["uids"]) if sync["uids"] is not None else None,
+        }
+        # what `routing` actually trusts when it decides about a raw port
+        out["raw_open"] = status.get("raw_open") or routing.raw_report(node["id"])
+        measured = routing.measured_edge(node)
+        out["edge"] = {
+            "scheme": routing.edge_scheme(node),
+            "port": routing.edge_port(node),
+            "measured": bool(measured),
         }
     return out
 
@@ -1528,7 +1525,7 @@ async def api_edge_check(request: Request, _: str = Depends(_require_auth)):
 
     in_front = _nginx_in_front()
     for name, (path, headers) in checks.items():
-        code, extra = _probe(path, headers)
+        code, _extra = _probe(path, headers)
         alive = code in (200, 400, 415, 426, 101)
         detail = ""
         if code == 0:
@@ -1683,30 +1680,20 @@ _node_latency_snap: dict = {}
 
 
 def _auto_node() -> dict | None:
-    """Fastest currently-online remote node (None if none measured yet)."""
-    best = None
-    for n in db.list_nodes():
-        if n.get("is_local") or not n.get("enabled"):
-            continue
-        if not (n.get("address") or "").strip():
-            continue
-        lat = _node_latency_snap.get(n["id"])
-        if lat is None:
-            continue
-        if best is None or lat < best[0]:
-            best = (lat, n)
-    return best[1] if best else None
+    """Fastest node that is online *and* currently trusted to serve this user set.
+
+    Latency alone used to be the whole rule, which could send an "auto" user to a
+    node that was offline, disabled or had never received the config. `routing`
+    owns the verified version.
+    """
+    return routing.auto_node()
 
 
-def _wg_server_pub(u: dict) -> str:
+def _wg_server_pub(u: dict, plan: dict | None = None) -> str:
     """The WG server public key for the node that will actually serve `u`."""
-    nid = nodesync.user_node_id(u)
-    node = None
-    if nid == 0:
-        node = _auto_node()
-    elif not config.IS_NODE:
-        node = db.get_node(nid)
-    if node and not node.get("is_local"):
+    plan = plan or routing.serving(u)
+    node = plan.get("node")
+    if plan["target"] == "node" and node:
         return (node.get("wg_pub") or "").strip()
     return wg.server_public_key()
 
