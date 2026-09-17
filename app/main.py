@@ -39,10 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import APP_NAME, APP_VERSION, config, db, security, state, xray
-from . import links as links_mod
-from . import linktest
 from . import nodes as nodesync
-from . import profiles
 from . import reality
 from . import tasks as bg
 from . import wg
@@ -894,33 +891,6 @@ def _sanitize_avatar_key(key) -> str:
     return ""
 
 
-# ---------------------------------------------- config-builder field validation
-def _clean_sni(value) -> str:
-    """A hostname we are willing to advertise as a Reality SNI / TLS name."""
-    v = str(value or "").strip()[:253]
-    if not v or not re.fullmatch(r"[A-Za-z0-9._-]+", v):
-        return ""
-    return v
-
-
-def _clean_flow(value) -> str:
-    v = str(value if value is not None else "").strip()
-    return v if v in config.VALID_FLOWS else ""
-
-
-def _clean_policy_level(value) -> int:
-    try:
-        v = int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-    return v if v in config.VALID_POLICY_LEVELS else 0
-
-
-def _clean_recipe(value) -> str:
-    v = str(value or "").strip()[:32]
-    return v if profiles.get_recipe(v) else ""
-
-
 def _resolve_avatar(key) -> dict:
     """Map an avatar key to {key, url}. Default is the TiTaN logo."""
     key = _sanitize_avatar_key(key)
@@ -1103,14 +1073,6 @@ async def api_create_user(request: Request, _: str = Depends(_require_auth)):
                 if prev:
                     return {"ok": True, "user": _serialize_user(prev, with_links=True, request=request), "deduped": True}
     settings = db.get_settings()
-    # A recipe is a starting point, never an override: it fills in the fields the
-    # admin did not touch, so "give me a fast config for X" is one click and the
-    # panel still respects every explicit choice in the same request.
-    payload, _recipe_applied = profiles.apply_recipe(dict(payload), payload.get("recipe"))
-    _recipe_settings = {}
-    if _recipe_applied:
-        _recipe = profiles.get_recipe(_recipe_applied) or {}
-        _, _recipe_settings = profiles.split_fields(_recipe.get("fields") or {})
     uid = secrets.token_hex(8)
     protocol = payload.get("protocol", "vless")
     if protocol not in config.VALID_PROTOCOLS:
@@ -1194,12 +1156,6 @@ async def api_create_user(request: Request, _: str = Depends(_require_auth)):
         "node_id": db.coerce_node_id(payload.get("node_id")),
         "avatar": _sanitize_avatar_key(payload.get("avatar")),
         "ss_method": ss_method,
-        # ---- config builder ----
-        "flow": _clean_flow(payload.get("flow")),
-        "reality_sni": _clean_sni(payload.get("reality_sni")),
-        "policy_level": _clean_policy_level(payload.get("policy_level")),
-        "mux_enabled": bool(payload.get("mux_enabled")),
-        "recipe": _clean_recipe(payload.get("recipe")) or _recipe_applied or "",
     }
     user = db.create_user(data)
     if protocol == "wireguard":
@@ -1208,22 +1164,10 @@ async def api_create_user(request: Request, _: str = Depends(_require_auth)):
     if dedup_key:
         with _recent_creates_lock:
             _recent_creates[dedup_key] = (time.time(), uid)
-    # A recipe's panel-wide half (fragmentation, XHTTP mode) is applied here, and
-    # only for keys the panel is not already using a different value for.
-    if _recipe_settings:
-        current = db.get_settings()
-        changes = {k: v for k, v in _recipe_settings.items()
-                   if current.get(k) != v and k not in payload}
-        if changes:
-            try:
-                db.set_settings(changes)
-            except Exception:  # noqa: BLE001 - a settings write must not lose the user
-                log.warning("recipe settings not applied: %s", changes)
     _reload_xray()
     _trigger_node_sync()
     db.add_event("info", "user-create", f"{user['name']} ({protocol})", ip=_client_ip(request))
-    return {"ok": True, "user": _serialize_user(user, with_links=True, request=request),
-            "recipe_settings": _recipe_settings}
+    return {"ok": True, "user": _serialize_user(user, with_links=True, request=request)}
 
 
 @app.get("/api/users/{uid}")
@@ -1243,22 +1187,11 @@ async def api_update_user(uid: str, request: Request, _: str = Depends(_require_
     fields = {}
     for k in ("name", "note", "enabled", "protocol", "transport", "security",
               "fingerprint", "alpn", "public_key", "short_id", "spider_x",
-              "max_devices", "allowed_ips", "max_requests", "node_id", "ss_method",
-              "flow", "reality_sni", "policy_level", "mux_enabled", "recipe"):
+              "max_devices", "allowed_ips", "max_requests", "node_id", "ss_method"):
         if k in payload:
             fields[k] = payload[k]
     if "avatar" in payload:
         fields["avatar"] = _sanitize_avatar_key(payload.get("avatar"))
-    if "flow" in fields:
-        fields["flow"] = _clean_flow(fields["flow"])
-    if "reality_sni" in fields:
-        fields["reality_sni"] = _clean_sni(fields["reality_sni"])
-    if "policy_level" in fields:
-        fields["policy_level"] = _clean_policy_level(fields["policy_level"])
-    if "mux_enabled" in fields:
-        fields["mux_enabled"] = bool(fields["mux_enabled"])
-    if "recipe" in fields:
-        fields["recipe"] = _clean_recipe(fields["recipe"])
     if "node_id" in fields:
         fields["node_id"] = db.coerce_node_id(fields["node_id"])
     if "ss_method" in fields and fields["ss_method"] not in config.SS_METHODS:
@@ -1288,15 +1221,6 @@ async def api_update_user(uid: str, request: Request, _: str = Depends(_require_
                     raise HTTPException(400, "invalid-allowed_ips") from None
                 cleaned.append(ip)
         fields["allowed_ips"] = cleaned
-    if payload.get("recipe"):
-        # same rule as create: fill only what the request did not set itself
-        merged = {k: v for k, v in user.items() if k in profiles.ALLOWED_FIELDS}
-        merged.update({k: v for k, v in payload.items() if k in profiles.ALLOWED_FIELDS})
-        merged, _applied = profiles.apply_recipe(merged, payload.get("recipe"))
-        for k, v in merged.items():
-            if k in profiles.ALLOWED_FIELDS and k not in payload:
-                fields.setdefault(k, v)
-        fields["recipe"] = _clean_recipe(payload.get("recipe"))
     proto = fields.get("protocol", user.get("protocol", "vless"))
     if proto not in config.VALID_PROTOCOLS:
         raise HTTPException(400, "invalid-protocol")
@@ -1393,58 +1317,6 @@ async def api_user_links(uid: str, request: Request, _: str = Depends(_require_a
     if not user:
         raise HTTPException(404, "not-found")
     return _serialize_user(user, with_links=True, request=request)
-
-
-# ------------------------------------------------- config builder: recipes & checks
-@app.get("/api/recipes")
-async def api_recipes(_: str = Depends(_require_auth)):
-    """The ready-made profiles plus the vocabularies the UI needs to render them.
-
-    Sent to the browser once and cached there, so the dashboard never has to
-    hard-code a profile list that the backend could change under it.
-    """
-    return {
-        "recipes": profiles.list_recipes(),
-        "plans": [{"level": lvl, "label": lbl}
-                  for lvl, lbl in sorted(config.POLICY_PLAN_LABELS.items())],
-        "flows": [f for f in ("", "none", "xtls-rprx-vision", "xtls-rprx-vision-udp443")],
-    }
-
-
-@app.get("/api/users/{uid}/client-config")
-async def api_user_client_config(uid: str, request: Request, _: str = Depends(_require_auth)):
-    """The user's config as an importable Xray JSON (same tuning as the links)."""
-    user = db.get_user(uid)
-    if not user:
-        raise HTTPException(404, "not-found")
-    settings = db.get_settings()
-    if _user_is_remote(user):
-        settings = {**settings, "sni_override": ""}
-    host, port = _user_endpoint(user, request)
-    try:
-        cfg = links_mod.build_client_config(user, host, port, settings,
-                                        server_pub="")
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from None
-    cfg["remarks"] = f"TiTaN-{user['name']}"
-    return JSONResponse(cfg)
-
-
-@app.post("/api/users/{uid}/link-test")
-async def api_user_link_test(uid: str, _: str = Depends(_require_auth)):
-    """Prove the user's config connects — really connects — before handing it over.
-
-    Runs off the event loop (it spawns an engine and opens sockets), so a slow
-    target cannot stall the panel for everyone else.
-    """
-    user = db.get_user(uid)
-    if not user:
-        raise HTTPException(404, "not-found")
-    settings = db.get_settings()
-    report = await asyncio.to_thread(linktest.test_user, user, settings)
-    db.add_event("info" if report.get("ok") else "warn", "link-test",
-                 f"{user['name']}: {'ok' if report.get('ok') else 'failed'}")
-    return {"ok": True, "report": report}
 
 
 @app.get("/api/users/{uid}/qr")

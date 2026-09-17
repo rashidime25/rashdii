@@ -24,21 +24,6 @@ SERVED_TRANSPORTS = {
 }
 
 
-def _flow_for(user: dict, default: str = "xtls-rprx-vision") -> str:
-    """The flow this user's client should ask for.
-
-    `""` is a real answer (plain VLESS, no Vision) and must stay empty so the
-    link matches what the server configured for that user — a mismatch is a
-    connection that dies on the first byte.
-    """
-    flow = user.get("flow")
-    if flow in (None, "", "__inherit__") or flow == "__inherit__":
-        return default                 # legacy rows: panel default
-    if flow == "none":
-        return ""                      # explicitly plain VLESS
-    return str(flow).strip()
-
-
 def _transport_for(user: dict, settings: dict) -> str:
     """Resolve the transport a user's link should advertise.
 
@@ -111,9 +96,7 @@ def build_vless_link(host: str, port: int, user: dict, settings: dict) -> str:
         # the panel's generated keypair (settings), with per-user overrides.
         pk = quote(user.get("public_key") or settings.get("reality_pub", ""), safe="")
         sid = quote(user.get("short_id") or settings.get("reality_sid", ""), safe="")
-        # a user pinned to their own SNI keeps working when the shared name is
-        # blocked; the inbound advertises every name users are pinned to.
-        rsni = (user.get("reality_sni") or settings.get("reality_sni") or sni)
+        rsni = settings.get("reality_sni") or sni
         # spiderX is the *path* the client starts crawling at. It must be a
         # path or empty — never the SNI: Xray rejects the whole client config
         # with `invalid "spiderX": <value>` (tested), so every Reality link the
@@ -122,12 +105,10 @@ def build_vless_link(host: str, port: int, user: dict, settings: dict) -> str:
         if not spider.startswith("/"):
             spider = "/" + spider
         sx = quote(spider, safe="/")
-        flow = _flow_for(user)
-        flow_q = f"&flow={quote(flow, safe='')}" if flow else ""
         return (
             f"vless://{uuid}@{host}:{port}?encryption=none&security=reality&"
             f"pbk={pk}&sid={sid}&sni={quote(rsni, safe='')}&spx={sx}&fp={fp}&type=tcp&"
-            f"headerType=none{flow_q}{_extra_query(settings)}#{name}"
+            f"headerType=none&flow=xtls-rprx-vision{_extra_query(settings)}#{name}"
         )
 
     sec = "tls" if security == "tls" else "none"
@@ -302,113 +283,3 @@ def _path_for(protocol: str, transport: str) -> str:
 
 def _grpc_service(user: dict) -> str:
     return "titan"
-
-# --------------------------------------------------------------------- client
-def build_client_config(user: dict, host: str, port: int, settings: dict,
-                        server_pub: str = "") -> dict:
-    """A ready-to-import Xray client config for one user.
-
-    Share links are the 90% path; this is the power-user path. It expresses the
-    *server's* tuning from the client side — the same per-user SNI/shortId/flow,
-    the same XHTTP mode and xmux, and the client-side half of the socket tuning
-    — so what the panel promises and what the client does are the same thing.
-    Every field here was accepted by Xray 26.9.9 (`run -test`) before shipping.
-    """
-    proto = (user.get("protocol") or "vless").lower()
-    if proto not in ("vless", "vmess", "trojan", "shadowsocks"):
-        # Hysteria2/WireGuard have no Xray client outbound: better a clear error
-        # than a JSON file that imports and silently never connects.
-        raise ValueError(f"protocol {proto} has no Xray client config")
-    transport = _transport_for(user, settings)
-    security = (user.get("security") or "tls").lower()
-    fp = user.get("fingerprint") or settings.get("default_fingerprint", "chrome")
-    alpn = user.get("alpn", settings.get("default_alpn", "http/1.1"))
-    sni = user.get("reality_sni") or settings.get("sni_override") or host
-    ss: dict = {"network": transport}
-    if security == "reality":
-        ss["security"] = "reality"
-        ss["realitySettings"] = {
-            "serverName": user.get("reality_sni") or settings.get("reality_sni") or host,
-            "fingerprint": fp,
-            "publicKey": user.get("public_key") or settings.get("reality_pub", ""),
-            "shortId": user.get("short_id") or settings.get("reality_sid", ""),
-            "spiderX": str(user.get("spider_x") or "/").strip() or "/",
-        }
-    elif security == "tls":
-        ss["security"] = "tls"
-        ss["tlsSettings"] = {"serverName": sni, "fingerprint": fp,
-                             "allowInsecure": False}
-        if alpn:
-            ss["tlsSettings"]["alpn"] = [a for a in str(alpn).split(",") if a]
-
-    if transport == "ws":
-        ss["wsSettings"] = {"path": _path_for("vless", "ws"), "host": host}
-    elif transport == "xhttp":
-        ss["xhttpSettings"] = {"path": "/xhttp", "host": host}
-    elif transport == "httpupgrade":
-        ss["httpupgradeSettings"] = {"path": "/hup", "host": host}
-    elif transport == "grpc":
-        ss["grpcSettings"] = {"serviceName": "titan"}
-
-    ss["sockopt"] = {"domainStrategy": "UseIPv4"}
-
-    outbound: dict = {"protocol": user.get("protocol", "vless"), "streamSettings": ss,
-                      "tag": "proxy"}
-    if user.get("protocol") == "shadowsocks":
-        outbound["settings"] = {"servers": [{"address": host, "port": port,
-                                             "method": user.get("ss_method", "aes-128-gcm"),
-                                             "password": user.get("uuid", "")}]}
-    elif user.get("protocol") == "vless":
-        entry = {"id": user.get("uuid", ""),
-                 "email": user.get("uid") or user.get("name", ""),
-                 "encryption": "none", "level": int(user.get("policy_level") or 0)}
-        flow = _flow_for(user)
-        if flow:
-            entry["flow"] = flow
-        outbound["settings"] = {"vnext": [{"address": host, "port": port, "users": [entry]}]}
-    else:
-        outbound["settings"] = {"servers": [{
-            "address": host, "port": port, "password": user.get("uuid", ""),
-            "level": int(user.get("policy_level") or 0)}]}
-
-    # Reality+Vision cannot be multiplexed: the engine refuses the stream, so the
-    # panel drops the flag instead of handing out a config that dies on connect.
-    vision = user.get("protocol") == "vless" and _flow_for(user) and security == "reality"
-    if user.get("mux_enabled") and not vision and transport != "xhttp":
-        outbound["mux"] = {"enabled": True, "concurrency": 8, "xudpConcurrency": 16,
-                           "xudpProxyUDP443": "reject"}
-
-    fragment = None
-    if settings.get("fragment_enabled"):
-        fragment = {"packets": "tlshello",
-                    "length": str(settings.get("fragment_length", "10-30")),
-                    "interval": str(settings.get("fragment_interval", "10-20"))}
-
-    # `freedom.settings.domainStrategy` is deprecated in this engine; the
-    # supported spelling is the outbound's own sockopt (verified on 26.9.9).
-    direct: dict = {"protocol": "freedom", "tag": "direct",
-                    "sockopt": {"domainStrategy": "UseIPv4"}}
-    if fragment:
-        # fragmentation is a *client* feature: the ClientHello is split so the
-        # DPI box never sees a whole SNI. It belongs on the direct/fragment leg.
-        direct["fragment"] = fragment
-
-    return {
-        "log": {"loglevel": "warning"},
-        "dns": {"servers": ["1.1.1.1", "8.8.8.8"]},
-        "inbounds": [
-            {"listen": "127.0.0.1", "port": 10808, "protocol": "socks",
-             "settings": {"udp": True, "auth": "noauth"}, "sniffing": {"enabled": True,
-             "destOverride": ["http", "tls", "quic"], "routeOnly": False}, "tag": "socks"},
-            {"listen": "127.0.0.1", "port": 10809, "protocol": "http", "tag": "http"},
-        ],
-        "outbounds": [outbound, direct, {"protocol": "blackhole", "tag": "block"}],
-        "routing": {"domainStrategy": "AsIs", "rules": [
-            # explicit private ranges: no geoip.dat dependency, so the config
-            # also works on clients that stripped the geo files.
-            {"type": "field",
-             "ip": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-                    "169.254.0.0/16", "::1/128", "fc00::/7"],
-             "outboundTag": "direct"},
-        ]},
-    }

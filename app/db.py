@@ -120,6 +120,26 @@ def _connect() -> sqlite3.Connection:
     return _conn
 
 
+def _archive_retired_user_columns(c, columns: list) -> str:
+    """Write the values of ``columns`` to a JSON file before they are dropped.
+
+    Returns the path (empty when there was nothing worth keeping). Stored outside
+    the DB on purpose: this is a one-time rescue copy, not a feature.
+    """
+    rows = c.execute(f"SELECT uid, {', '.join(columns)} FROM users").fetchall()
+    kept = {}
+    for row in rows:
+        values = {col: row[col] for col in columns if row[col] not in ("", 0, None)}
+        if values:
+            kept[row["uid"]] = values
+    if not kept:
+        return ""
+    path = os.path.join(config.DATA_DIR, f"reverted-user-fields-{int(time.time())}.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(kept, fh, ensure_ascii=False, indent=2)
+    return path
+
+
 def _ensure_bootstrap():
     """Generate secret key / default settings / migrations on first run."""
     c = _conn
@@ -150,25 +170,26 @@ def _ensure_bootstrap():
     if "wg_pub" not in cols:
         c.execute("ALTER TABLE users ADD COLUMN wg_pub TEXT NOT NULL DEFAULT ''")
         c.commit()
-    # Per-user engine knobs (config builder): flow, identity + policy level.
-    # `flow` empty means "inherit the panel default for this transport";
-    # `short_id` and `reality_sni` give each user their own Reality identity on a
-    # shared inbound (blocking/serving one user without touching the others).
-    if "flow" not in cols:
-        c.execute("ALTER TABLE users ADD COLUMN flow TEXT NOT NULL DEFAULT ''")
-        c.commit()
-    if "reality_sni" not in cols:
-        c.execute("ALTER TABLE users ADD COLUMN reality_sni TEXT NOT NULL DEFAULT ''")
-        c.commit()
-    if "policy_level" not in cols:
-        c.execute("ALTER TABLE users ADD COLUMN policy_level INTEGER NOT NULL DEFAULT 0")
-        c.commit()
-    if "mux_enabled" not in cols:
-        c.execute("ALTER TABLE users ADD COLUMN mux_enabled INTEGER NOT NULL DEFAULT 0")
-        c.commit()
-    if "recipe" not in cols:
-        c.execute("ALTER TABLE users ADD COLUMN recipe TEXT NOT NULL DEFAULT ''")
-        c.commit()
+
+    # The per-user "advanced config" columns were reverted. Dropping them (rather
+    # than ignoring them) is what makes the revert real: a column nobody reads
+    # still travels through every SELECT * and every API payload. What the rows
+    # held is written to a JSON file first - silently destroying an admin's data
+    # is not a revert either.
+    present = [col for col in config.RETIRED_USER_COLUMNS if col in cols]
+    if present:
+        try:
+            _archive_retired_user_columns(c, present)
+        except Exception:  # noqa: BLE001 - never let housekeeping block the boot
+            pass
+        for col in present:
+            try:
+                c.execute(f"ALTER TABLE users DROP COLUMN {col}")
+                c.commit()
+            except sqlite3.OperationalError:
+                # SQLite < 3.35 cannot drop a column. Leaving it is harmless: the
+                # API and the UI no longer know the field exists.
+                break
 
     # migration: nodes.token (per-node credential issued by the main panel)
     ncols = [r["name"] for r in c.execute("PRAGMA table_info(nodes)").fetchall()]
@@ -347,7 +368,6 @@ def create_user(data: dict) -> dict:
             "spider_x", "max_devices", "first_device_uid", "allowed_ips",
             "quota_bytes", "expire_at", "created_at", "max_requests", "node_id",
             "avatar", "ss_method", "wg_ip", "wg_priv", "wg_pub",
-            "flow", "reality_sni", "policy_level", "mux_enabled", "recipe",
         ]
         now = time.time()
         values = {
@@ -377,11 +397,6 @@ def create_user(data: dict) -> dict:
             "wg_ip": data.get("wg_ip", "") or "",
             "wg_priv": data.get("wg_priv", "") or "",
             "wg_pub": data.get("wg_pub", "") or "",
-            "flow": data.get("flow", "") or "",
-            "reality_sni": data.get("reality_sni", "") or "",
-            "policy_level": int(data.get("policy_level", 0) or 0),
-            "mux_enabled": 1 if data.get("mux_enabled") else 0,
-            "recipe": (data.get("recipe") or "")[:32],
         }
         placeholders = ", ".join("?" for _ in cols)
         c.execute(
@@ -402,8 +417,6 @@ def update_user(uid: str, fields: dict) -> dict | None:
         # allowed_ips was missing from this allowlist, so PATCH silently
         # dropped it (the handler validated it, the UPDATE never wrote it).
         "allowed_ips",
-        # config-builder knobs (see the migration above)
-        "flow", "reality_sni", "policy_level", "mux_enabled", "recipe",
     }
     with _lock:
         c = _connect()

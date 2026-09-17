@@ -100,6 +100,11 @@ def _panel_hosts() -> list:
 #: the DB would keep being echoed by GET /api/settings (and shown in the UI) even
 #: though nothing reads it any more, so it is dropped once at boot - a revert
 #: that leaves ghosts behind is not a revert.
+#: users.* columns that came from the same reverted feature set. They are dropped
+#: from the database once (see db._ensure_bootstrap) - a column nobody reads still
+#: shows up in every SELECT * and every API payload.
+RETIRED_USER_COLUMNS = ("recipe", "flow", "reality_sni", "policy_level", "mux_enabled")
+
 RETIRED_SETTINGS = (
     "reality_server_names", "sock_tfo", "sock_nodelay", "sock_keepalive",
     "sock_user_timeout", "sock_congestion", "xhttp_mode", "xhttp_padding",
@@ -289,29 +294,6 @@ DEFAULT_SETTINGS = {
 # Which Xray outbound tags are counted as "blocked" domains (for the routing
 # feature). Must match the tag names emitted in xray.py::generate_xray_config.
 BLOCKED_TAGS = {"block-ads", "block-iran", "block-adult", "block-custom"}
-
-# users.flow: "" (or "__inherit__") = use the panel default for that transport,
-# "none" = explicitly no flow (plain VLESS), otherwise the flow string itself.
-# The sentinel exists because every row created before this feature has ''.
-VALID_FLOWS = {"", "__inherit__", "none", "xtls-rprx-vision", "xtls-rprx-vision-udp443"}
-VALID_POLICY_LEVELS = {0, 1, 2}
-
-# Xray `policy.levels` presets a user can be pinned to (users.policy_level).
-# Level 0 is the shared default (stats only). A per-user level is how the panel
-# offers "gaming" (small buffers, aggressive reconnects) and "stream/download"
-# (fat buffers, lazy teardown) without a second inbound per plan.
-POLICY_PLANS = {
-    1: {"handshake": 2, "connIdle": 900, "uplinkOnly": 0, "downlinkOnly": 0,
-        "bufferSize": 256},
-    2: {"handshake": 6, "connIdle": 1800, "uplinkOnly": 2, "downlinkOnly": 5,
-        "bufferSize": 1024},
-}
-
-POLICY_PLAN_LABELS = {
-    0: "پیش‌فرض (متعادل)",
-    1: "گیمینگ (تأخیر کم)",
-    2: "استریم/دانلود (توان بالا)",
-}
 
 VALID_FINGERPRINTS = {"chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized"}
 VALID_ALPNS = {"http/1.1", "h2,http/1.1", "h3,h2,http/1.1", ""}
