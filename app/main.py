@@ -16,6 +16,7 @@ import secrets
 import threading
 import time
 import uuid as uuid_lib
+from urllib.parse import quote
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -1874,6 +1875,7 @@ def _node_setup(node: dict, token: str, request: Request | None) -> dict:
         "token": token,
         "env": env,
         "lines": [f"{k}={v}" for k, v in env.items()],
+        "block": "\n".join(f"{k}={v}" for k, v in env.items()),
         "note": ("این متغیرها را روی سرویسِ نود بگذار و دوباره دیپلوی کن؛ "
                  "یا به‌جای توکن، TITAN_NODE_SECRET را روی پنل و نود یکسان تنظیم کن."),
     }
@@ -1990,13 +1992,29 @@ def _normalize_node_address(raw: str) -> str:
 async def api_create_node(request: Request, _: str = Depends(_require_auth)):
     payload = await request.json()
     name = (payload.get("name") or "").strip()[:64]
-    if not name:
-        raise HTTPException(400, "name-required")
+    # No name yet? The domain can supply one (see the detection block below) —
+    # asking for both is what made adding a node feel like manual work.
     address = _normalize_node_address(payload.get("address") or "")
     cc = (payload.get("country_code") or "").strip()[:2].upper()
     city = (payload.get("city") or "").strip()[:64]
     country = (payload.get("country") or "").strip()[:64]
     flag = (payload.get("flag") or "").strip()[:8]
+    # Domain alone is enough: ask the address what it is and take everything it
+    # can tell us (name, city, flag, edge, raw ports, whether it holds a
+    # credential yet). Only `name` is required at the end of this block.
+    probe: dict = {"kind": "skipped", "identity": {}}
+    claim: dict = {}
+    if address and payload.get("detect", True) is not False:
+        probe = await _probe_node_identity(address)
+        identity = probe.get("identity") or {}
+        found = _discovery_fields(identity)
+        name = name or (found.get("name") or "")
+        city = city or (found.get("city") or "")
+        country = country or (found.get("country") or "")
+        cc = cc or (found.get("country_code") or "")
+        flag = flag or (found.get("flag") or "")
+        if not name:
+            raise HTTPException(400, "name-required")
     # Auto-detect location from the normalized address when admin hasn't set it manually.
     # Never overwrite an explicit city/country/country_code/flag provided in the payload.
     if address and not cc and not flag:
@@ -2023,13 +2041,35 @@ async def api_create_node(request: Request, _: str = Depends(_require_auth)):
         "flag": flag,
         "token": token,
     })
+    # A fresh TiTaN node holds no credential: hand it the fleet secret over the
+    # same channel we discovered it on, so the admin never pastes variables.
+    if probe.get("kind") == "titan" and (probe.get("identity") or {}).get("accepts_bootstrap"):
+        panel_url = ""
+        try:
+            panel_url = f"https://{_public_host(request)}"
+        except Exception:  # noqa: BLE001
+            panel_url = ""
+        claim = await _claim_node(probe.get("url") or address, panel_url)
+        if claim.get("ok"):
+            node = db.get_node(node["id"]) or node
     db.add_event("info", "node-create", name, ip=_client_ip(request))
     # Prove the upload path right now: the admin learns whether this node can
     # really take users, instead of finding out when a config later falls back.
     node_sync = await _sync_node_now(node["id"])
-    return {"ok": True, "node": _serialize_node(node, await _node_status(node)),
-            "sync_now": node_sync, "token": token,
-            "setup": _node_setup(node, token, request)}
+    return {
+        "ok": True,
+        "token": token,
+        "node": _serialize_node(node, await _node_status(node)),
+        "sync_now": node_sync,
+        "node_sync": node_sync,
+        "discovery": {
+            "kind": probe.get("kind"),
+            "error": probe.get("error") or "",
+            "identity": probe.get("identity") or {},
+            "claim": claim,
+        },
+        "setup": _node_setup(node, token, request),
+    }
 
 
 @app.patch("/api/nodes/{node_id}")
@@ -2305,6 +2345,111 @@ async def api_node_register(request: Request):
     return {"ok": True, "node": _serialize_node(db.get_node(node["id"]), await _node_status(node))}
 
 
+@app.get("/api/node/discover")
+async def api_node_discover(request: Request):
+    """Node side: identity card, so a panel can add this instance from a domain.
+
+    Public, because the *panel* (not a browser) is the caller: it has no session
+    on this service, and it has to be able to ask "what are you?" before it can
+    add the node. Nothing sensitive is in the answer — app/version/role, where it
+    is, how it is reachable, and whether a credential is configured yet (a boolean
+    the panel must know to decide between pushing and claiming). The user count,
+    the panel URL and the claim time are only returned when the caller proves it
+    already holds this node's credential.
+    """
+    data = nodesync.identity()
+    presented = (request.headers.get("x-titan-node-secret")
+                 or request.query_params.get("secret") or "")
+    if not nodesync.secret_valid_for_node(presented):
+        for key in ("users", "panel_url", "claimed_at"):
+            data.pop(key, None)
+    return data
+
+
+@app.post("/api/node/bootstrap")
+async def api_node_bootstrap(request: Request):
+    """Node side: accept the fleet secret from the panel that claims this node.
+
+    Allowed only while this instance holds no credential at all, so the first
+    panel to reach a fresh node owns it and nobody can re-claim it afterwards
+    without already knowing the secret. Storing the secret here is what makes
+    "give me the project domain and the node is configured" possible without
+    typing variables into the node's service.
+    """
+    payload = await request.json()
+    secret = str(payload.get("secret") or "").strip()
+    panel_url = str(payload.get("panel_url") or "").strip()
+    if len(secret) < 16:
+        raise HTTPException(400, "secret-too-short")
+    current = nodesync.node_credential()
+    if current:
+        if secrets.compare_digest(current, secret):
+            return {"ok": True, "already": True}
+        raise HTTPException(409, "node-already-claimed")
+    nodesync.store_node_credential(secret, panel_url)
+    db.add_event("warn", "node-claimed", f"panel={(panel_url or 'unknown')}", ip=_client_ip(request))
+    log.warning("this node was claimed by %s through /api/node/bootstrap",
+                panel_url or "an unknown panel")
+    return {"ok": True, "claimed": True, "panel_url": panel_url}
+
+
+@app.post("/api/nodes/detect")
+async def api_detect_node(request: Request, _: str = Depends(_require_auth)):
+    """What is behind this domain? Fills the add-node form, nothing is stored."""
+    payload = await request.json()
+    addr = (payload.get("address") or "").strip()
+    if not addr:
+        raise HTTPException(400, "address-required")
+    probe = await _probe_node_identity(addr)
+    identity = probe.get("identity") or {}
+    return {
+        "ok": probe["kind"] == "titan",
+        "kind": probe["kind"],
+        "url": probe.get("url") or "",
+        "error": probe.get("error") or "",
+        "fields": _discovery_fields(identity),
+        "identity": identity,
+        "needs_credentials": bool(identity) and not identity.get("credential"),
+        "can_claim": bool(identity.get("accepts_bootstrap")),
+    }
+
+
+@app.post("/api/nodes/{node_id}/claim")
+async def api_claim_node(node_id: int, request: Request, _: str = Depends(_require_auth)):
+    """Discover + claim + verify an already-added node, in one call."""
+    node = db.get_node(node_id)
+    if not node or node.get("is_local"):
+        raise HTTPException(404, "not-found")
+    addr = (node.get("address") or "").strip()
+    if not addr:
+        raise HTTPException(400, "address-required")
+    probe = await _probe_node_identity(addr)
+    identity = probe.get("identity") or {}
+    claim: dict = {}
+    if probe["kind"] == "titan":
+        fields = _discovery_fields(identity)
+        if fields:
+            db.update_node(node_id, fields)
+        if identity.get("accepts_bootstrap"):
+            panel_url = ""
+            try:
+                panel_url = f"https://{_public_host(request)}"
+            except Exception:  # noqa: BLE001
+                panel_url = ""
+            claim = await _claim_node(probe.get("url") or addr, panel_url)
+    node = db.get_node(node_id)
+    node_sync = await _sync_node_now(node_id)
+    _node_status_cache.pop(node_id, None)
+    db.add_event("info", "node-claim", f"{node_id}: {probe['kind']}", ip=_client_ip(request))
+    return {
+        "ok": node_sync.get("ok", False),
+        "kind": probe["kind"],
+        "identity": identity,
+        "claim": claim,
+        "node_sync": node_sync,
+        "node": _serialize_node(node, await _node_status(node)),
+    }
+
 @app.post("/api/nodes/invite")
 async def api_invite_node(request: Request, _: str = Depends(_require_auth)):
     """Main side: issue a one-time credential for a new node (quick setup)."""
@@ -2320,7 +2465,356 @@ def _clean_public_url(raw: str) -> str:
     return _normalize_node_address(raw)
 
 
+# ------------------------------------------------------- node auto-detection
+def _discover_candidates(addr: str) -> list[str]:
+    """URLs to try, most likely first, for a node handed over as a domain."""
+    raw = (addr or "").strip().rstrip("/")
+    if not raw:
+        return []
+    if raw.startswith("http://"):
+        return [raw]
+    if raw.startswith("https://"):
+        return [raw, "http://" + raw[len("https://"):]]
+    return ["https://" + raw, "http://" + raw]
+
+
+async def _probe_node_identity(addr: str, timeout: float = 6.0) -> dict:
+    """Ask a domain what it is. Never raises: returns a verdict instead.
+
+    ``kind`` is ``titan`` (it answered with our own identity card), ``foreign``
+    (something answered, but not a TiTaN instance) or ``unreachable``.
+    """
+    out = {"kind": "unreachable", "url": "", "identity": {}, "error": ""}
+    tried = []
+    for base in _discover_candidates(addr):
+        url = base + "/api/node/discover"
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as cl:
+                r = await cl.get(url, headers={"User-Agent": "TiTaN-panel",
+                                               "X-TiTaN-Node-Secret": config.NODE_SECRET})
+            tried.append(f"{base} -> HTTP {r.status_code}")
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, dict) and (data.get("app") == "titan" or data.get("role")):
+                    out.update({"kind": "titan", "url": base, "identity": data})
+                    return out
+                out.update({"kind": "foreign", "url": base, "error": "not-a-titan-node"})
+                return out
+        except Exception as e:  # noqa: BLE001
+            tried.append(f"{base} -> {type(e).__name__}")
+    out["error"] = "; ".join(tried[-3:]) or "unreachable"
+    return out
+
+
+async def _claim_node(addr_url: str, panel_url: str, timeout: float = 8.0) -> dict:
+    """Hand this node the fleet secret so it can serve users right away.
+
+    Trust on first use: only a node that holds *no* credential accepts a claim,
+    so the first panel to reach a fresh node owns it. A node that already has
+    one answers 409 and the panel falls back to showing the variables instead.
+    """
+    secret = config.NODE_SECRET
+    if not secret:
+        return {"ok": False, "error": "panel-has-no-shared-secret"}
+    payload = {"secret": secret, "panel_url": (panel_url or "").rstrip("/")}
+    url = addr_url.rstrip("/") + "/api/node/bootstrap"
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as cl:
+            r = await cl.post(url, json=payload, headers={"User-Agent": "TiTaN-panel"})
+        if r.status_code == 200:
+            data = r.json() if r.text else {}
+            return {"ok": True, "claimed": bool(data.get("claimed")), "already": bool(data.get("already"))}
+        if r.status_code == 409:
+            return {"ok": False, "error": "node-already-claimed"}
+        return {"ok": False, "error": f"HTTP {r.status_code}"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": type(e).__name__}
+
+
+def _discovery_fields(identity: dict) -> dict:
+    """Node columns the identity card can fill in (never overwrites with blanks)."""
+    fields = {}
+    for key in ("name", "city", "country", "flag"):
+        value = (identity.get(key) or "").strip()
+        if value and value not in ("—", "🏳️"):
+            fields[key] = value[:64]
+    cc = (identity.get("country_code") or "").strip().upper()
+    if len(cc) == 2:
+        fields["country_code"] = cc
+        fields.setdefault("flag", _flag_for(cc))
+    return fields
+
+
+# ------------------------------------------------------------- subscriptions
+def _sub_items(raw) -> list:
+    """Normalise stored items to ``[{"uid": ..., "configs": [...]}]``."""
+    out = []
+    if not isinstance(raw, (list, tuple)):
+        return out
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        uid = str(entry.get("uid") or "").strip()
+        if not uid:
+            continue
+        configs = [str(c).strip().lower() for c in (entry.get("configs") or []) if str(c).strip()]
+        out.append({"uid": uid, "configs": configs})
+    return out
+
+
+def _sub_status_of(user: dict) -> dict:
+    try:
+        return _user_status(user)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _sub_catalog(request: Request, users: list | None = None) -> list:
+    """Every user and every config that user could contribute to a link.
+
+    One call renders the whole builder: users, their live state, and the configs
+    the server would really hand out for each of them (same pipeline as the
+    links themselves, so the builder can never offer something that does not
+    exist).
+    """
+    out = []
+    for u in (users if users is not None else db.list_users()):
+        st = _sub_status_of(u)
+        entries = _sub_entries(u, request)
+        picked = set(_sub_selection(u))
+        out.append({
+            "uid": u["uid"],
+            "name": u["name"],
+            "protocol": u["protocol"],
+            "enabled": bool(u.get("enabled")),
+            "node_id": u.get("node_id"),
+            "expired": bool(st.get("expired")),
+            "configs": [{
+                "key": e["key"],
+                "label": e["label"],
+                "transport": e["transport"],
+                "security": e["security"],
+                "target": e["target"],
+                "host": e["host"],
+            } for e in entries],
+            "personal_pick": sorted(picked),
+        })
+    return out
+
+
+def _sub_included(sub: dict, users_by_uid: dict, request: Request) -> list:
+    """The concrete links a subscription link serves, after every filter."""
+    items = _sub_items(sub.get("items"))
+    links: list = []
+    seen: set = set()
+    for item in items:
+        user = users_by_uid.get(item["uid"])
+        if not user or not user.get("enabled"):
+            continue
+        entries = _sub_entries(user, request)
+        if item["configs"]:
+            chosen = [e for e in entries if e["key"] in set(item["configs"])]
+        else:
+            chosen = entries
+        for e in chosen:
+            if e["link"] not in seen:
+                seen.add(e["link"])
+                links.append(e["link"])
+    return links
+
+
+def _sub_link_url(sub: dict, request: Request) -> str:
+    host = _public_host(request)
+    scheme = "http" if host.startswith(("127.", "localhost")) else "https"
+    return f"{scheme}://{host}/s/{sub['token']}"
+
+
+def _serialize_subscription(sub: dict, request: Request, users: list | None = None) -> dict:
+    users = users if users is not None else db.list_users()
+    by_uid = {u["uid"]: u for u in users}
+    items = _sub_items(sub.get("items"))
+    links = _sub_included(sub, by_uid, request)
+    named = [{"uid": i["uid"],
+              "name": (by_uid.get(i["uid"]) or {}).get("name") or i["uid"],
+              "configs": i["configs"]} for i in items]
+    return {
+        "id": sub["id"],
+        "name": sub.get("name") or f"Subscription {sub['id']}",
+        "enabled": bool(sub.get("enabled")),
+        "token": sub["token"],
+        "url": _sub_link_url(sub, request),
+        "items": named,
+        "users": len(named),
+        "configs": len(links),
+        "missing": [i["uid"] for i in items if i["uid"] not in by_uid],
+        "note": sub.get("note") or "",
+        "hits": int(sub.get("hits") or 0),
+        "last_used": sub.get("last_used") or 0,
+        "created_at": sub.get("created_at") or 0,
+    }
+
+
+def _sub_payload_items(payload: dict, users_by_uid: dict, request: Request) -> list:
+    """Validate the builder's selection against what each user can really offer."""
+    raw = payload.get("items")
+    if raw is None:
+        return []
+    out = []
+    for entry in _sub_items(raw):
+        user = users_by_uid.get(entry["uid"])
+        if not user:
+            continue
+        available = {e["key"] for e in _sub_entries(user, request)}
+        picked = [c for c in entry["configs"] if c in available]
+        out.append({"uid": entry["uid"], "configs": picked})
+    return out
+
+
+def _sub_headers_multi(name: str, users: list) -> dict:
+    used_up = sum(int(u.get("used_up") or 0) for u in users)
+    used_down = sum(int(u.get("used_down") or 0) for u in users)
+    total = sum(int(u.get("quota_bytes") or 0) for u in users)
+    expire = max([int(u.get("expire_at") or 0) for u in users] or [0])
+    info = f"upload={used_up}; download={used_down}; total={total}; expire={expire}"
+    return {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Subscription-Userinfo": info,
+        "subscription-userinfo": info,
+        "Profile-Update-Interval": "1",
+        "profile-update-interval": "1",
+        "Profile-Title": "base64:" + base64.b64encode(name.encode()).decode(),
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "X-Powered-By": "TiTaN",
+    }
+
+
+def _sub_status_link(name: str, users: list) -> str:
+    used = sum((u.get("used_up") or 0) + (u.get("used_down") or 0) for u in users) / (1024 ** 3)
+    quota = sum(u.get("quota_bytes") or 0 for u in users) / (1024 ** 3)
+    remark = f"TiTaN {name} | {used:.2f}/{quota:g}GB | {len(users)} users"
+    return ("vless://00000000-0000-0000-0000-000000000001@127.0.0.1:10001?"
+            f"encryption=none&security=none&type=tcp&headerType=none#{quote(remark)}")
+
+
+def _sub_body(sub: dict, request: Request) -> tuple:
+    """(base64 body, included users) for one subscription link."""
+    users = db.list_users()
+    by_uid = {u["uid"]: u for u in users}
+    included = [by_uid[i["uid"]] for i in _sub_items(sub.get("items")) if i["uid"] in by_uid]
+    links = [_sub_status_link(sub.get("name") or "TiTaN", included)] + _sub_included(
+        sub, by_uid, request)
+    return subscription_text(links), included
+
+
+async def _dispatch_subscription(token: str, request: Request, fmt: str):
+    sub = db.get_subscription_by_token(token)
+    if not sub:
+        raise HTTPException(404, "not-found")
+    if not sub.get("enabled"):
+        raise HTTPException(403, "subscription-disabled")
+    db.touch_subscription(sub["id"])
+    body, users = _sub_body(sub, request)
+    headers = _sub_headers_multi(sub.get("name") or "TiTaN", users)
+    if fmt == "json":
+        return JSONResponse({
+            "name": sub.get("name"),
+            "users": [{"uid": u["uid"], "name": u["name"]} for u in users],
+            "links": _sub_included(sub, {u["uid"]: u for u in users}, request),
+        }, headers=headers)
+    # Same shape as the personal link (/sub/{uid}): the plain path answers with
+    # the base64 payload every client already parses, /json is for debugging.
+    return Response(content=body, media_type="text/plain", headers=headers)
+
+
 # ------------------------------------------------------------------ subscriptions
+@app.get("/api/subscriptions")
+async def api_list_subscriptions(request: Request, _: str = Depends(_require_auth)):
+    users = db.list_users()
+    subs = [_serialize_subscription(s, request, users) for s in db.list_subscriptions()]
+    return {"ok": True, "subscriptions": subs, "count": len(subs)}
+
+
+@app.get("/api/subscriptions/catalog")
+async def api_subscriptions_catalog(request: Request, _: str = Depends(_require_auth)):
+    """Everything the builder needs: users x the configs each one can contribute."""
+    return {"ok": True, "users": _sub_catalog(request), "subscriptions": [
+        _serialize_subscription(s, request) for s in db.list_subscriptions()]}
+
+
+@app.post("/api/subscriptions")
+async def api_create_subscription(request: Request, _: str = Depends(_require_auth)):
+    payload = await request.json()
+    name = (payload.get("name") or "").strip()[:64] or "Subscription"
+    users_by_uid = {u["uid"]: u for u in db.list_users()}
+    items = _sub_payload_items(payload, users_by_uid, request)
+    if not items:
+        raise HTTPException(400, "no-configs-selected")
+    token = secrets.token_urlsafe(18)
+    sub = db.create_subscription(name, token, items,
+                                 note=(payload.get("note") or "")[:200],
+                                 enabled=payload.get("enabled", True) is not False)
+    db.add_event("info", "sub-create", f"{name} ({len(items)} users)", ip=_client_ip(request))
+    return {"ok": True, "subscription": _serialize_subscription(sub, request, list(users_by_uid.values()))}
+
+
+@app.patch("/api/subscriptions/{sub_id}")
+async def api_update_subscription(sub_id: int, request: Request, _: str = Depends(_require_auth)):
+    sub = db.get_subscription(sub_id)
+    if not sub:
+        raise HTTPException(404, "not-found")
+    payload = await request.json()
+    fields: dict = {}
+    if "name" in payload:
+        fields["name"] = (payload.get("name") or "").strip()[:64] or sub["name"]
+    if "note" in payload:
+        fields["note"] = (payload.get("note") or "")[:200]
+    if "enabled" in payload:
+        fields["enabled"] = bool(payload["enabled"])
+    if "items" in payload:
+        users_by_uid = {u["uid"]: u for u in db.list_users()}
+        fields["items"] = _sub_payload_items(payload, users_by_uid, request)
+    updated = db.update_subscription(sub_id, fields)
+    db.add_event("info", "sub-update", f"{sub_id}: {sub.get('name')}", ip=_client_ip(request))
+    return {"ok": True, "subscription": _serialize_subscription(updated, request)}
+
+
+@app.delete("/api/subscriptions/{sub_id}")
+async def api_delete_subscription(sub_id: int, request: Request, _: str = Depends(_require_auth)):
+    if not db.delete_subscription(sub_id):
+        raise HTTPException(404, "not-found")
+    db.add_event("warn", "sub-delete", str(sub_id), ip=_client_ip(request))
+    return {"ok": True}
+
+
+@app.get("/api/subscriptions/{sub_id}/qr")
+async def api_subscription_qr(sub_id: int, request: Request, _: str = Depends(_require_auth)):
+    sub = db.get_subscription(sub_id)
+    if not sub:
+        raise HTTPException(404, "not-found")
+    img = qrcode.make(_sub_link_url(sub, request), border=2)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/png")
+
+
+@app.get("/s/{token}")
+async def sub_link(token: str, request: Request):
+    return await _dispatch_subscription(token, request, "plain")
+
+
+@app.get("/s/{token}/base64")
+async def sub_link_base64(token: str, request: Request):
+    return await _dispatch_subscription(token, request, "base64")
+
+
+@app.get("/s/{token}/json")
+async def sub_link_json(token: str, request: Request):
+    return await _dispatch_subscription(token, request, "json")
+
+
 @app.get("/sub/{uid}")
 async def sub_plain(uid: str, request: Request):
     user = db.get_user(uid)

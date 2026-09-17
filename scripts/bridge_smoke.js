@@ -86,6 +86,25 @@ const PAYLOADS = {
   '/api/reports': { daily: [], totals: {}, protocols: [] },
   '/api/settings': { default_transport: 'ws' },
   '/api/me': { username: 'TiTaN', avatar: null },
+  // two links the admin built: one carrying configs of two users, one disabled
+  '/api/subscriptions': { ok: true, count: 2, subscriptions: [
+    { id: 1, name: 'پک موبایل', enabled: true, token: 'tok-abcdef123456',
+      url: 'https://panel.test/s/tok-abcdef123456', users: 2, configs: 3, hits: 7,
+      last_used: 1789600000, missing: [], note: '',
+      items: [{ uid: 'u1', name: 'Ali', configs: ['ws', 'grpc'] },
+              { uid: 'u2', name: 'Sara', configs: ['tcp'] }] },
+    { id: 2, name: 'پک دسکتاپ', enabled: false, token: 'tok-998877665544',
+      url: 'https://panel.test/s/tok-998877665544', users: 1, configs: 4, hits: 0,
+      last_used: 0, missing: [], note: '',
+      items: [{ uid: 'u1', name: 'Ali', configs: [] }] },
+  ] },
+  '/api/subscriptions/catalog': { ok: true, users: USERS.map((u) => ({
+    uid: u.uid, name: u.name, protocol: u.protocol, enabled: u.enabled !== false,
+    node_id: u.node_id, expired: false,
+    configs: [{ key: 'ws', label: 'WS · TLS', transport: 'ws', security: 'tls', target: 'panel', host: 'panel.test' },
+              { key: 'grpc', label: 'GRPC', transport: 'grpc', security: 'tls', target: 'panel', host: 'panel.test' }],
+    personal_pick: u.sub_transports || [],
+  })), subscriptions: [] },
 };
 const fetchStub = async (url) => {
   const key = String(url).split('?')[0].replace(/\/+$/, '');
@@ -142,9 +161,9 @@ const check = (cond, msg) => { if (!cond) failures.push(msg); };
   check(!grid.includes('>ویرایش<') && !grid.includes('>حذف<'), 'a server action still shows a Persian word');
 
   // ── users / configs / subscriptions: premium icon actions ────────────────
-  for (const [name, acts] of [['users', ['edit', 'detail', 'del', 'qr', 'power']],
+  for (const [name, acts] of [['users', ['edit', 'detail', 'del', 'qr', 'power', 'configs']],
                               ['configs', ['edit', 'links', 'del', 'qr', 'power']],
-                              ['subscriptions', ['copy', 'qr', 'view', 'configs']]]) {
+                              ['subscriptions', ['manage', 'copy', 'qr', 'power', 'del']]]) {
     const tbody = html(inSection(name, '.data-table tbody'));
     check(tbody.length > 40, `${name}: the table stayed empty`);
     check(!tbody.includes('mini-btn'), `${name}: a text button is still rendered`);
@@ -152,10 +171,13 @@ const check = (cond, msg) => { if (!cond) failures.push(msg); };
     for (const act of acts) check(tbody.includes(`data-act="${act}"`), `${name}: missing the ${act} action`);
   }
 
-  // the subscription row shows how many configs the link carries
+  // the subscription rows are *links*: name, how many users, how many configs
   const subs = html(inSection('subscriptions', '.data-table tbody'));
-  check(subs.includes('sub-count'), 'the subscription rows do not show the config count');
-  check(/sub-count[^>]*>2</.test(subs), 'the picked config count is not rendered (' + subs.slice(0, 120) + ')');
+  check(subs.includes('sub-count'), 'the subscription rows do not show their counts');
+  check(/sub-count[^>]*>2</.test(subs), 'the user count is not rendered');
+  check(/sub-count[^>]*>3</.test(subs), 'the config count is not rendered');
+  check(subs.includes('پک موبایل') && subs.includes('پک دسکتاپ'), 'the built links are not listed');
+  check(!subs.includes('هنوز لینک اشتراکی'), 'the empty state is shown although links exist');
 
   // a node that can serve shows *which* credential it accepted
   check(grid.includes('shared secret'), 'the node card does not name the accepted credential');
@@ -164,6 +186,19 @@ const check = (cond, msg) => { if (!cond) failures.push(msg); };
   // ── latency advisor (client-side ping, not the panel->node probe) ────────
   const bridgeSrc = src;                       // the real bridge, as loaded above
   const dashboardSrc = fs.readFileSync(path.join(REPO, 'templates/dashboard.html'), 'utf8');
+  // ── subscription builder + node auto-detect ──────────────────────────────
+  check(/async function openSubBuilder/.test(bridgeSrc), 'the subscription builder is not in the bridge');
+  check(/\/api\/subscriptions'/.test(bridgeSrc) && /\/api\/subscriptions\//.test(bridgeSrc),
+    'the builder does not talk to the subscription API');
+  check(/\.sub-chip/.test(bridgeSrc) && /\.sub-chip/.test(dashboardSrc || ''),
+    'the builder chips are not rendered/styled');
+  check(/detectNode/.test(bridgeSrc) && /\/api\/nodes\/detect/.test(bridgeSrc),
+    'the add-node modal cannot identify a domain');
+  check(/setupCopyAll/.test(bridgeSrc) && /setup\.block/.test(bridgeSrc),
+    'the setup modal has no copy-every-variable button');
+  check(grid.includes('data-act="claim"'), 'the node card has no one-click detect/connect action');
+  check(dashboardSrc.includes('ساخت لینک اشتراک جدید'), 'the subscriptions header has no new-link button');
+
   check(/openLatencyAdvisor/.test(bridgeSrc), 'the latency advisor is not in the bridge');
   check(/data-act','advisor'/.test(bridgeSrc), 'the section-head pulse button is not bound to the advisor');
   check(/cp\.cloudflare\.com\/generate_204/.test(bridgeSrc), 'the advisor does not measure the Cloudflare floor');
@@ -187,7 +222,8 @@ const check = (cond, msg) => { if (!cond) failures.push(msg); };
   console.log(`ok  servers     ${(grid.match(/class="node-lux/g) || []).length} luxury cards, states covered`);
   console.log('ok  users       premium icon actions');
   console.log('ok  configs     premium icon actions');
-  console.log('ok  subscriptions premium icon actions');
+  console.log('ok  subscriptions built links + builder wired');
+  console.log('ok  nodes       domain-only add + copy-all variables');
   console.log('ok  dashboard   latency bands + medals');
   console.log('bridge rendered every section');
 })();

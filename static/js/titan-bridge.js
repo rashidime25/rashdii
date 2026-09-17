@@ -189,6 +189,137 @@
     }, 20);
   }
 
+  // ── subscription builder ───────────────────────────────────────────────────
+  // A subscription is an object, not a view of a user: it has a name, its own
+  // token and a list of (user, config) pairs. Building one mirrors building a
+  // config — pick the pieces from what really exists, the panel mints the link.
+  async function openSubBuilder(sub, refresh){
+    const cat = await apiJson('/api/subscriptions/catalog');
+    const users = cat.users||[];
+    const editing = sub||null;
+    // A *new* link starts empty: the whole point is choosing. An edit re-opens
+    // with exactly the saved pick (an empty saved list means "every config of
+    // that user", so that is shown as everything ticked).
+    const picked = {};
+    const keysOf = (uid)=> ((users.find(u=>u.uid===uid)||{}).configs||[]).map(c=>c.key);
+    (editing && editing.items ? editing.items : []).forEach(it=>{
+      picked[it.uid] = new Set(it.configs && it.configs.length ? it.configs : keysOf(it.uid));
+    });
+    const isOn = (uid,key)=>{ const s=picked[uid]; return !!s && s.has(key); };
+
+    const rows = users.map(u=>{
+      const chips = (u.configs||[]).map(c=>
+        `<button type="button" class="sub-chip${isOn(u.uid,c.key)?' on':''}" data-sub-uid="${esc(u.uid)}" data-sub-key="${esc(c.key)}" data-tip="${esc(c.transport+'/'+c.security+' · '+(c.target==='node'?'روی نود':'روی پنل'))}">${esc(c.label||c.key)}</button>`).join('');
+      const state = u.expired ? 'منقضی' : (u.enabled ? 'فعال' : 'خاموش');
+      const cls = u.expired ? 'warn' : (u.enabled ? '' : 'off');
+      return `<div class="sub-user" data-uid="${esc(u.uid)}">
+        <div class="sub-user-head">
+          <span class="sub-user-name">${esc(u.name)}<span class="muted"> · ${esc((u.protocol||'').toUpperCase())}</span></span>
+          <span class="pill ${cls}">${esc(state)}</span>
+          <span class="spacer"></span>
+          ${icoBtn({"type":"button","data-sub-all":u.uid},"checks","همهٔ کانفیگ‌های این کاربر")}
+          ${icoBtn({"type":"button","data-sub-none":u.uid},"xcircle","هیچ‌کدام")}
+        </div>
+        <div class="sub-chips">${chips || '<span class="muted">کانفیگی برای این کاربر ساخته نشده</span>'}</div>
+      </div>`;
+    }).join('');
+
+    const countLinks = ()=> Array.from(document.querySelectorAll('#titanModal .sub-chip.on')).length;
+    createModal(editing?'ویرایش لینک اشتراک':'ساخت لینک اشتراک', `
+      <div style="display:grid;gap:14px">
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">نام اشتراک
+          <input id="subName" value="${esc(editing&&editing.name||'')}" placeholder="مثلاً پک موبایل" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">
+        </label>
+        <p style="margin:0;font-size:11px;color:#a8a6bf;line-height:2">
+          از بین کانفیگ‌های ساخته‌شده انتخاب کن؛ هر چیزی که تیک بخورد داخل همین لینک می‌آید.
+          یک کاربر می‌تواند چند کانفیگ داشته باشد و چند کاربر می‌توانند در یک لینک جمع شوند.
+        </p>
+        <div class="sub-list">${rows || '<div class="muted">هنوز کاربری ساخته نشده</div>'}</div>
+        <div class="sub-summary" id="subSummary"></div>
+        ${editing?`<div class="sub-url" dir="ltr"><span>${esc(editing.url||'')}</span>${icoBtn({"type":"button","data-sub-copyurl":editing.id},"copy","کپی لینک","violet")}</div>`:''}
+      </div>`, async (overlay)=>{
+        const name = $('#subName',overlay).value.trim();
+        if(!name) throw new Error('نام اشتراک را بنویس');
+        const items = [];
+        overlay.querySelectorAll('.sub-user').forEach(box=>{
+          const uid = box.dataset.uid;
+          const on = Array.from(box.querySelectorAll('.sub-chip.on')).map(c=>c.dataset.subKey);
+          if(on.length) items.push({uid:uid, configs:on});
+        });
+        if(!items.length) throw new Error('حداقل یک کانفیگ انتخاب کن');
+        const body = {name:name, items:items};
+        const res = editing ? await apiJson('/api/subscriptions/'+editing.id,{method:'PATCH',body:body})
+                            : await apiJson('/api/subscriptions',{method:'POST',body:body});
+        if(refresh) refresh();
+        if(res.subscription && res.subscription.url){
+          try{ await navigator.clipboard.writeText(res.subscription.url); }catch(e){}
+          return 'لینک ساخته شد و کپی شد ✓';
+        }
+        return 'ذخیره شد';
+      });
+    setTimeout(()=>{
+      const overlay=$('#titanModal'); if(!overlay) return;
+      const box=$('#subSummary',overlay);
+      const paint=()=>{
+        const n=Array.from(overlay.querySelectorAll('.sub-chip.on')).length;
+        let u=0;
+        overlay.querySelectorAll('.sub-user').forEach(b=>{ if(b.querySelector('.sub-chip.on')) u++; });
+        if(box) box.textContent = n ? (n+' کانفیگ از '+u+' کاربر در این لینک') : 'هیچ کانفیگی انتخاب نشده';
+      };
+      overlay.querySelectorAll('.sub-chip').forEach(chip=> chip.addEventListener('click', ()=>{
+        chip.classList.toggle('on'); paint();
+      }));
+      overlay.querySelectorAll('[data-sub-all]').forEach(b=> b.addEventListener('click', ()=>{
+        const uid=b.dataset.subAll;
+        overlay.querySelectorAll(`.sub-chip[data-sub-uid="${uid}"]`).forEach(c=>c.classList.add('on')); paint();
+      }));
+      overlay.querySelectorAll('[data-sub-none]').forEach(b=> b.addEventListener('click', ()=>{
+        const uid=b.dataset.subNone;
+        overlay.querySelectorAll(`.sub-chip[data-sub-uid="${uid}"]`).forEach(c=>c.classList.remove('on')); paint();
+      }));
+      const copyBtn=overlay.querySelector('[data-sub-copyurl]');
+      if(copyBtn) copyBtn.addEventListener('click', async()=>{
+        try{ await navigator.clipboard.writeText(editing.url||''); toast('لینک کپی شد'); }catch(e){ toast(editing.url||''); }
+      });
+      paint();
+    }, 20);
+  }
+
+  // ── add a node from a domain alone ────────────────────────────────────────
+  // The panel asks the address what it is before anything is saved, so the form
+  // fills itself and the admin sees whether the node will accept users right
+  // away. When it cannot identify the domain, the variables are still one click
+  // away (نسخهٔ دستی).
+  async function detectNode(addr, box){
+    if(!addr){ toast('اول دامنهٔ نود را بزن'); return null; }
+    if(box) box.innerHTML='<span class="lat-spin">…</span> در حال شناسایی '+esc(addr);
+    let d;
+    try{ d = await apiJson('/api/nodes/detect',{method:'POST',body:{address:addr}}); }
+    catch(e){ if(box) box.innerHTML='<span class="det-bad">شناسایی نشد: '+esc(e.message)+'</span>'; return null; }
+    const id = d.identity||{};
+    if(d.ok){
+      const f = d.fields||{};
+      const fill=(sel,val)=>{ const el=$(sel); if(el && !el.value && val) el.value=val; };
+      fill('#mn_name', f.name||''); fill('#mn_city', f.city||''); fill('#mn_country', f.country||'');
+      fill('#mn_cc', f.country_code||''); fill('#mn_flag', f.flag||'');
+      const nameEl=$('#mn_name'); if(nameEl && f.name && !nameEl.value) nameEl.value=f.name;
+      if(box) box.innerHTML = `<div class="det-card">
+        <div class="det-row"><span class="det-ok">✓ نود TiTaN شناسایی شد</span>
+          <span class="muted" dir="ltr">v${esc(id.version||'?')} · ${esc(id.role||'node')}</span></div>
+        <div class="det-row"><span>${esc(id.flag||'🌐')} ${esc(id.city||'—')}${id.country_code?' · '+esc(id.country_code):''}</span>
+          <span class="muted" dir="ltr">edge ${esc((id.edge||{}).scheme||'https')} :${esc(String((id.edge||{}).port||''))}</span></div>
+        <div class="det-row"><span>${id.credential? 'کلید نود تنظیم شده است ('+esc(id.credential)+')' : 'کلید نود تنظیم نشده'}</span>
+          <span class="${id.accepts_bootstrap?'det-ok':'det-bad'}">${id.accepts_bootstrap? 'با زدن «ذخیره» خودکار وصل می‌شود ✓' : 'اگر وصل نشد، متغیرها را ست کن'}</span></div>
+      </div>`;
+    } else if(d.kind==='foreign'){
+      if(box) box.innerHTML = '<div class="det-card"><div class="det-row"><span class="det-bad">این آدرس جواب می‌دهد ولی TiTaN نیست</span><span class="muted">دستی اضافه کن</span></div></div>';
+    } else {
+      if(box) box.innerHTML = '<div class="det-card"><div class="det-row"><span class="det-bad">شناسایی خودکار ممکن نشد</span><span class="muted" dir="ltr">'+esc(d.error||'')+'</span></div>'
+        + '<div class="det-row muted">دستی پر کن؛ بعد از ذخیره، متغیرها را با یک دکمه کپی می‌کنی.</div></div>';
+    }
+    return d;
+  }
+
   // --- gallery picker (real, as in old panel) ---
   function avatarUrl(key){
     key=key||''; if(key.startsWith('gallery:')) return '/static/img/gallery/'+key.slice(8)+'.svg'; if(key.startsWith('upload:')) return '/api/gallery-image/'+key.slice(7); return '/static/img/titan-avatar.svg';
@@ -531,6 +662,9 @@
   // into the node service, with the copy button, and says what happens meanwhile.
   function openNodeSetupModal(res){
     const setup=res.setup||{}; const sync=res.sync_now||{};
+    const probe=(res.discovery&&res.discovery.kind)||res.kind||'';
+    const who=(res.discovery&&res.discovery.identity)||res.identity||{};
+    const claim=(res.discovery&&res.discovery.claim)||res.claim||{};
     const lines=(setup.lines||[]).map(l=>{
       const i=l.indexOf('=');
       return `<div class="env-line"><span class="env-k">${esc(l.slice(0,i))}</span><span class="env-v" dir="ltr">${esc(l.slice(i+1))}</span></div>`;
@@ -541,9 +675,20 @@
           ${sync.ok ? 'نود جواب داد و کاربرانش را گرفت ✓'
                     : 'این نود هنوز جواب نداده'+(sync.error?' ('+esc(sync.error)+')':'')+' — تا آن موقع، کانفیگ‌های این نود روی خودِ پنل سرو می‌شوند (تایم‌اوت نمی‌کنند).'}
         </div>
+        <div class="det-card">
+          ${probe==='titan'
+            ? `<div class="det-row"><span class="det-ok">✓ نود شناسایی شد</span><span class="muted" dir="ltr">${esc(who.version||'')} · ${esc(who.role||'node')}</span></div>`
+            : `<div class="det-row"><span class="det-bad">شناسایی خودکار انجام نشد</span><span class="muted" dir="ltr">${esc(probe||'unknown')}</span></div>`}
+          ${claim&&claim.ok? `<div class="det-row"><span class="det-ok">دسترسی خودکار داده شد — نیازی به متغیر نیست ✓</span></div>`:''}
+          ${claim&&claim.error? `<div class="det-row"><span class="det-bad">دسترسی خودکار نشد (${esc(claim.error)})</span><span class="muted">متغیرها را ست کن</span></div>`:''}
+        </div>
         <p style="margin:0;font-size:11px;color:#a8a6bf;line-height:2">
-          روی سرویسِ همین نود، این متغیرها را ست کن و یک‌بار دیپلوی کن؛ بعد از آن، کاربرهایی که به این نود بدهی روی دامنهٔ خودش سرو می‌شوند.
+          اگر نود خودکار وصل شد، همین‌جا کارت تمام است. اگر نه، این متغیرها را روی سرویسِ نود بگذار و یک‌بار دیپلوی کن.
         </p>
+        <div style="display:flex;align-items:center;gap:10px">
+          ${icoBtn({"type":"button","id":"setupCopyAll"},"copy","کپی همهٔ متغیرها با یک کلیک","violet")}
+          <span style="font-size:11px;color:#a8a6bf">کپی همه (آماده برای Raw Editor)</span>
+        </div>
         <div class="env-list">${lines}</div>
         <p style="margin:0;font-size:10.5px;color:#8586a8;line-height:2">${esc(setup.note||'')}</p>
       </div>`, async ()=>{ /* nothing to save: it is a recipe */ });
@@ -554,6 +699,12 @@
         const line=e.target.closest('.env-line'); if(!line) return;
         const text=line.querySelector('.env-k').textContent+'='+line.querySelector('.env-v').textContent;
         try{ await navigator.clipboard.writeText(text); toast('کپی شد'); }catch(err){ toast(text); }
+      });
+      const copyAll=$('#setupCopyAll',overlay);
+      if(copyAll) copyAll.addEventListener('click', async()=>{
+        const text=(setup.block || (setup.lines||[]).join('\n'));
+        try{ await navigator.clipboard.writeText(text); toast('همهٔ متغیرها کپی شد ✓'); }
+        catch(err){ toast('کپی نشد — دستی انتخاب کن'); }
       });
       const save=$('#titanModalSave',overlay);
       if(save){ save.textContent='فهمیدم'; save.onclick=()=>overlay.remove(); }
@@ -623,7 +774,13 @@
     createModal(isEdit?'ویرایش سرور':'افزودن سرور', `
       <div style="display:grid;gap:12px">
         <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">نام*<input id="mn_name" value="${esc(n.name||'')}" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"></label>
-        <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">آدرس (دامنه/IP)<input id="mn_addr" value="${esc(n.address||'')}" dir="ltr" placeholder="your-node.up.railway.app" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"></label>
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">دامنهٔ سرویس نود (کافی است)
+          <span style="display:flex;gap:8px;align-items:center">
+            <input id="mn_addr" value="${esc(n.address||'')}" dir="ltr" placeholder="your-node.up.railway.app" style="flex:1;background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">
+            ${icoBtn({"type":"button","id":"mn_detect"},"pulse","شناسایی خودکار این دامنه","violet")}
+          </span>
+        </label>
+        <div id="mn_detectBox"></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
           <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">شهر<input id="mn_city" value="${esc(n.city||'')}" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"></label>
           <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">کشور<input id="mn_country" value="${esc(n.country||'')}" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"></label>
@@ -632,7 +789,7 @@
           <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">کد کشور (2 حرف)<input id="mn_cc" value="${esc(n.country_code||'')}" maxlength="2" style="text-transform:uppercase;background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"></label>
           <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">پرچم<input id="mn_flag" value="${esc(n.flag||'')}" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"></label>
         </div>
-        <div style="font-size:10px;color:#7d829d">اگر پرچم/شهر خالی باشد، با «بررسی» خودکار پر می‌شود (معماری قبلی).</div>
+        <div style="font-size:10px;color:#7d829d">دامنه را بزن و ذخیره کن: نام، شهر، پرچم و کلید نود خودکار تشخیص داده می‌شود. اگر شناسایی ممکن نشد، فیلدهای دستی را پر کن و بعد متغیرها را با یک دکمه کپی کن.</div>
       </div>
     `, async (overlay)=>{
       const body={
@@ -643,7 +800,7 @@
         country_code: $('#mn_cc',overlay).value.trim(),
         flag: $('#mn_flag',overlay).value.trim()
       };
-      if(!body.name) throw new Error('نام الزامی است');
+      if(!body.name && !body.address) throw new Error('دامنهٔ نود یا نام را بزن');
       let message='انجام شد';
       if(isEdit){
         const res=await apiJson('/api/nodes/'+n.id,{method:'PATCH',body});
@@ -651,8 +808,9 @@
         if(st.ok===false) message='نود جواب نداد ('+(st.error||'')+') — کانفیگ‌ها موقتاً از پنل سرو می‌شوند';
       } else {
         const res=await apiJson('/api/nodes',{method:'POST',body});
+        const found=(res.discovery&&res.discovery.kind==='titan');
         if(res.sync_now && res.sync_now.ok===false) openNodeSetupModal(res);
-        else message='نود اضافه شد و کاربرانش را گرفت ✓';
+        else message=(found? 'نود خودکار شناسایی و وصل شد ✓' : 'نود اضافه شد و کاربرانش را گرفت ✓');
       }
       setTimeout(()=> document.dispatchEvent(new Event('titan:refresh')), 100);
       return message;
@@ -661,6 +819,9 @@
       const overlay=$('#titanModal'); if(!overlay) return;
       const ccIn=$('#mn_cc',overlay), flagIn=$('#mn_flag',overlay);
       if(ccIn && flagIn) ccIn.addEventListener('input',()=>{ flagIn.value = flagFor(ccIn.value); });
+      const addrIn=$('#mn_addr',overlay), detBtn=$('#mn_detect',overlay), box=$('#mn_detectBox',overlay);
+      if(detBtn) detBtn.addEventListener('click', async()=>{ detBtn.disabled=true; try{ await detectNode(addrIn.value.trim(), box); } finally{ detBtn.disabled=false; } });
+      if(addrIn) addrIn.addEventListener('blur', ()=>{ if(addrIn.value.trim() && box && !box.innerHTML) detectNode(addrIn.value.trim(), box); });
     }, 20);
   }
 
@@ -703,10 +864,11 @@
               const days=u.expire_at? Math.max(0,Math.ceil((u.expire_at - Date.now()/1000)/86400))+' روز':'هرگز';
               const label=st.expired?'منقضی':(!u.enabled?'غیرفعال':'فعال'); const cls=st.expired?'warn':(!u.enabled?'off':'');
               const on = !!u.enabled && !(st.expired);
-              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td class="muted">#${esc(u.uid.slice(0,6))}</td><td>${esc(used)}</td><td>${esc(days)}</td><td><span class="pill ${cls}">${esc(label)}</span></td><td><div class="row-actions">${icoBtn({"data-uid":u.uid,"data-act":"edit"},"edit","ویرایش کاربر","gold")}${icoBtn({"data-uid":u.uid,"data-act":"detail"},"link","کپی لینک اتصال","violet")}${icoBtn({"data-uid":u.uid,"data-act":"qr"},"qr","QR code","")}${icoBtn({"data-uid":u.uid,"data-act":"power","data-on":on?1:0},"power",on?"خاموش کردن":"روشن کردن",on?"":"ok")}${icoBtn({"data-uid":u.uid,"data-act":"del"},"trash","حذف","danger")}</div></td></tr>`;
+              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td class="muted">#${esc(u.uid.slice(0,6))}</td><td>${esc(used)}</td><td>${esc(days)}</td><td><span class="pill ${cls}">${esc(label)}</span></td><td><div class="row-actions">${icoBtn({"data-uid":u.uid,"data-act":"edit"},"edit","ویرایش کاربر","gold")}${icoBtn({"data-uid":u.uid,"data-act":"detail"},"link","کپی لینک اتصال","violet")}${icoBtn({"data-uid":u.uid,"data-act":"qr"},"qr","QR code","")}${icoBtn({"data-uid":u.uid,"data-act":"configs"},"sliders","کانفیگ‌های لینک اشتراک این کاربر","gold")}${icoBtn({"data-uid":u.uid,"data-act":"power","data-on":on?1:0},"power",on?"خاموش کردن":"روشن کردن",on?"":"ok")}${icoBtn({"data-uid":u.uid,"data-act":"del"},"trash","حذف","danger")}</div></td></tr>`;
             }).join('') : '<tr><td colspan="6" style="text-align:center;color:#8586a8">کاربری وجود ندارد</td></tr>';
             tbody.querySelectorAll('[data-act="del"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; if(!confirm('حذف کاربر؟')) return; try{ await apiJson('/api/users/'+uid,{method:'DELETE'}); toast('حذف شد'); refreshUsers(); loadOverview(); }catch(e){toast(e.message);} }));
             tbody.querySelectorAll('[data-act="detail"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const d=await apiJson('/api/users/'+uid+'/links'); await navigator.clipboard.writeText(d.main_link||d.links[0]); toast('لینک کپی شد'); }catch(e){toast(e.message);} }));
+            tbody.querySelectorAll('[data-act="configs"]').forEach(b=> b.addEventListener('click', async()=>{ try{ await openSubConfigModal(b.dataset.uid, refreshUsers); }catch(e){toast(e.message);} }));
             tbody.querySelectorAll('[data-act="edit"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const u=await apiJson('/api/users/'+uid); await openUserModal(u); }catch(e){toast(e.message);} }));
             wireRowExtras(tbody, refreshUsers);
           }
@@ -852,6 +1014,7 @@
               ${note?`<div class="nl-note${(sync.ok===false&&on)?' bad':''}">${note}</div>`:''}
               <div class="nl-actions">
                 ${icoBtn({'data-id':n.id,'data-act':'ping'},'pulse','بررسی اتصال')}
+                ${icoBtn({'data-id':n.id,'data-act':'claim'},'bolt','شناسایی و اتصال خودکار (دامنه کافی است)','gold')}
                 ${icoBtn({'data-id':n.id,'data-act':'sync'},'sync','همگام‌سازی فوری','violet')}
                 ${icoBtn({'data-id':n.id,'data-act':'edit'},'edit','ویرایش نود','gold')}
                 <span class="spacer"></span>
@@ -873,6 +1036,15 @@
               b.disabled=true;
               try{ await apiJson('/api/nodes/'+id+'/ping',{method:'POST'}); toast('بررسی شد'); refreshServers(); loadOverview(); }
               catch(e){ toast(e.message); } finally{ b.disabled=false; }
+            } else if(act==='claim'){
+              b.disabled=true;
+              try{
+                const res=await apiJson('/api/nodes/'+id+'/claim',{method:'POST'});
+                const st=res.node_sync||{};
+                if(st.ok) toast('نود شناسایی شد و کاربرانش را گرفت ✓');
+                else { toast('وصل نشد — متغیرها را ببین'); openNodeSetupModal({setup:{...(window.__titanSetup||{})}, sync_now:st}); }
+                refreshServers(); loadOverview();
+              }catch(e){ toast(e.message); } finally{ b.disabled=false; }
             } else if(act==='sync'){
               b.disabled=true;
               try{ await apiJson('/api/nodes/'+id+'/sync',{method:'POST'}); toast('همگام‌سازی شد'); refreshServers(); }
@@ -907,26 +1079,53 @@
 
     const subsSection=document.querySelector('.section-view[data-section="subscriptions"]');
     if(subsSection){
+      // The tab lists *links*, not users: each row is a subscription the admin
+      // built (name + token + the exact configs it carries).
       async function refreshSubs(){
         try{
-          const d=await apiJson('/api/users'); const users=d.users||[]; const tbody=subsSection.querySelector('.data-table tbody');
+          const d=await apiJson('/api/subscriptions'); const subs=d.subscriptions||[];
+          const tbody=subsSection.querySelector('.data-table tbody');
           if(tbody){
-            tbody.innerHTML=users.length? users.map(u=>{
-              const st=u.status||{}; const label=st.expired?'منقضی':(!u.enabled?'غیرفعال':'فعال'); const cls=st.expired?'warn':(!u.enabled?'off':'');
-              const exp=u.expire_at? new Date(u.expire_at*1000).toLocaleDateString('fa-IR') : 'هرگز';
-              const picked=(u.sub_transports||[]).length;
-              return `<tr><td><span class="user-cell"><span class="avatar user-avatar"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>${esc(u.name)}</span></td><td><span class="pill ${cls}">${esc(label)}</span></td><td>${esc(exp)}</td><td><span class="sub-count" data-uid="${esc(u.uid)}">${picked?picked:'همه'}</span></td><td>${esc(fmtBytes(st.used||0))}</td><td><div class="row-actions">${icoBtn({"data-uid":u.uid,"data-act":"configs"},"sliders","انتخاب کانفیگ‌های این اشتراک","gold")}${icoBtn({"data-uid":u.uid,"data-act":"copy"},"copy","کپی لینک اشتراک","violet")}${icoBtn({"data-uid":u.uid,"data-act":"qr"},"qr","تصویر QR","")}${icoBtn({"data-uid":u.uid,"data-act":"view"},"eye","کپی لینک اتصال","ok")}</div></td></tr>`;
-            }).join('') : '<tr><td colspan="6" style="text-align:center;color:#8586a8">اشتراکی وجود ندارد</td></tr>';
-            tbody.querySelectorAll('[data-act="copy"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const d=await apiJson('/api/users/'+uid+'/links'); await navigator.clipboard.writeText(d.sub_url); toast('اشتراک کپی شد'); }catch(e){toast(e.message);} }));
-            tbody.querySelectorAll('[data-act="qr"]').forEach(b=> b.addEventListener('click', ()=>{ const uid=b.dataset.uid; window.open('/api/users/'+uid+'/qr','_blank'); }));
-            tbody.querySelectorAll('[data-act="view"]').forEach(b=> b.addEventListener('click', async()=>{ const uid=b.dataset.uid; try{ const d=await apiJson('/api/users/'+uid+'/links'); await navigator.clipboard.writeText(d.main_link||d.links[0]); toast('لینک کپی شد'); }catch(e){toast(e.message);} }));
-            tbody.querySelectorAll('[data-act="configs"]').forEach(b=> b.addEventListener('click', async()=>{ try{ await openSubConfigModal(b.dataset.uid, refreshSubs); }catch(e){toast(e.message);} }));
+            tbody.innerHTML=subs.length? subs.map(sb=>{
+              const on=!!sb.enabled;
+              const seen=sb.last_used? new Date(sb.last_used*1000).toLocaleString('fa-IR',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : 'هرگز';
+              return `<tr><td><span class="user-cell"><span class="avatar user-avatar sub-medal">${esc((sb.name||'S').slice(0,1).toUpperCase())}</span>${esc(sb.name)}</span><span class="sub-token muted" dir="ltr">…${esc((sb.token||'').slice(-6))}</span></td>`
+                +`<td><span class="pill ${on?'':'off'}">${on?'فعال':'غیرفعال'}</span></td>`
+                +`<td><span class="sub-count">${sb.users||0}</span> کاربر</td>`
+                +`<td><span class="sub-count">${sb.configs||0}</span> کانفیگ</td>`
+                +`<td class="muted">${sb.hits||0} بار · ${esc(seen)}</td>`
+                +`<td><div class="row-actions">${icoBtn({"data-sub":sb.id,"data-act":"manage"},"sliders","ساخت/ویرایش کانفیگ‌های این لینک","gold")}`
+                +`${icoBtn({"data-sub":sb.id,"data-act":"copy"},"copy","کپی لینک اشتراک","violet")}`
+                +`${icoBtn({"data-sub":sb.id,"data-act":"qr"},"qr","QR لینک اشتراک","")}`
+                +`${icoBtn({"data-sub":sb.id,"data-act":"power","data-on":on?1:0},"power",on?'غیرفعال کردن':'فعال کردن',on?'':'ok')}`
+                +`${icoBtn({"data-sub":sb.id,"data-act":"del"},"trash","حذف لینک","danger")}</div></td></tr>`
+            }).join('') : '<tr><td colspan="6" style="text-align:center;color:#8586a8">هنوز لینک اشتراکی ساخته نشده — با دکمهٔ بالا یکی بساز.</td></tr>';
+            const find=async(id)=>{ const list=(await apiJson('/api/subscriptions')).subscriptions||[]; return list.find(s=>String(s.id)===String(id)); };
+            tbody.querySelectorAll('[data-act="manage"]').forEach(b=> b.addEventListener('click', async()=>{
+              try{ const sb=await find(b.dataset.sub); await openSubBuilder(sb, refreshSubs); }catch(e){ toast(e.message); }
+            }));
+            tbody.querySelectorAll('[data-act="copy"]').forEach(b=> b.addEventListener('click', async()=>{
+              try{ const sb=await find(b.dataset.sub); await navigator.clipboard.writeText(sb.url); toast('لینک کپی شد'); }catch(e){ toast(e.message); }
+            }));
+            tbody.querySelectorAll('[data-act="qr"]').forEach(b=> b.addEventListener('click', ()=>{
+              window.open('/api/subscriptions/'+b.dataset.sub+'/qr','_blank');
+            }));
+            tbody.querySelectorAll('[data-act="power"]').forEach(b=> b.addEventListener('click', async()=>{
+              const on=b.dataset.on==='1'; b.disabled=true;
+              try{ await apiJson('/api/subscriptions/'+b.dataset.sub,{method:'PATCH',body:{enabled:!on}}); toast(on?'لینک غیرفعال شد':'لینک فعال شد'); refreshSubs(); }
+              catch(e){ toast(e.message); } finally{ b.disabled=false; }
+            }));
+            tbody.querySelectorAll('[data-act="del"]').forEach(b=> b.addEventListener('click', async()=>{
+              if(!confirm('این لینک اشتراک حذف شود؟')) return;
+              try{ await apiJson('/api/subscriptions/'+b.dataset.sub,{method:'DELETE'}); toast('حذف شد'); refreshSubs(); }catch(e){ toast(e.message); }
+            }));
           }
         }catch(e){ console.error(e); }
       }
       refreshSubs(); document.addEventListener('titan:refresh', refreshSubs);
+      const newSubBtn=subsSection.querySelector('.section-head .section-btn.primary');
+      if(newSubBtn) newSubBtn.onclick=()=> openSubBuilder(null, refreshSubs);
     }
-
     const reportsSection=document.querySelector('.section-view[data-section="reports"]');
     if(reportsSection){
       async function refreshReports(){

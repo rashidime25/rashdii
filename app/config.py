@@ -249,6 +249,10 @@ NODE_SECRET = os.environ.get("TITAN_NODE_SECRET", "")
 # and to verify the main panel's sync pushes. Replaces the shared secret.
 NODE_TOKEN = os.environ.get("TITAN_NODE_TOKEN", "")
 
+# Optional human name for this instance; otherwise the Railway service name is
+# used, and failing that a name built from the detected city.
+NODE_NAME = os.environ.get("TITAN_NODE_NAME", "").strip()
+
 # The node's own public URL (used to self-register with the main panel).
 # Auto-derived from Railway's injected RAILWAY_PUBLIC_DOMAIN when available.
 def _node_public_url() -> str:
