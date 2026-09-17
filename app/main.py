@@ -1913,8 +1913,14 @@ async def api_public_status(uid: str):
 # ------------------------------------------------------------------ system
 @app.get("/healthz")
 async def healthz():
-    """Ultra-fast liveness probe for Railway healthcheck - no DB, no WG."""
-    return {"status": "ok", "ts": time.time(), "version": APP_VERSION}
+    """Ultra-fast liveness probe for Railway healthcheck - no DB, no WG.
+
+    `listen_host`/`listen_port` are here on purpose: if the panel answers at all,
+    the payload says which socket answered, so "the edge reached us on a port we
+    did not expect" is visible from one curl instead of a support round-trip.
+    """
+    return {"status": "ok", "ts": time.time(), "version": APP_VERSION,
+            "listen_host": config.PANEL_HOST, "listen_port": config.PANEL_PORT}
 
 @app.get("/health")
 async def health():
@@ -2075,18 +2081,56 @@ def _cors_headers() -> dict:
 
 
 # ------------------------------------------------------------------ entrypoint
+def _listen_sockets(hosts, port):
+    """Open one listening socket per address, or explain why not.
+
+    Not loopback-only: whoever routes to us may sit in another netns (a platform
+    proxy) or be a VPS client hitting the panel port directly. Not one family
+    either: a platform edge that dials a family the panel does not serve is
+    indistinguishable from a dead app ("Application failed to respond" with a
+    healthy container behind it) - uvicorn's own `--host ::` would not help,
+    because asyncio sets IPV6_V6ONLY on the socket it binds.
+    """
+    import socket as _socket
+
+    opened = []
+    for host in hosts:
+        family = _socket.AF_INET6 if ":" in host else _socket.AF_INET
+        sock = _socket.socket(family, _socket.SOCK_STREAM)
+        if family == _socket.AF_INET6:
+            try:
+                sock.setsockopt(_socket.IPPROTO_IPV6, _socket.IPV6_V6ONLY, 1)
+            except OSError:  # pragma: no cover - platform dependent
+                pass
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+            sock.listen(2048)
+        except OSError as exc:
+            sock.close()
+            log.warning("routing: cannot bind %s:%s (%s) - continuing without it",
+                        host, port, exc)
+            continue
+        opened.append(sock)
+    if not opened:
+        log.error("routing: nothing bound on port %s - exiting so the platform restarts us",
+                  port)
+        raise SystemExit(1)
+    log.info("routing: panel bound on %s (port %s, platform PORT=%s)",
+             ", ".join(sorted(s.getsockname()[0] for s in opened)), port, config.PUBLIC_PORT)
+    return opened
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    # 0.0.0.0 because whoever routes to us may not come from loopback (a platform
-    # proxy in another netns, a VPS client hitting the panel port directly). The
-    # *port* stays PANEL_PORT: entrypoint.sh puts nginx on $PORT and forwards it
-    # here, or - with no nginx in the image - exports PANEL_PORT=$PORT itself.
-    log.info("routing: panel=0.0.0.0:%s (platform PORT=%s)",
-             config.PANEL_PORT, config.PUBLIC_PORT)
-    uvicorn.run(
+    # The *port* stays PANEL_PORT: entrypoint.sh puts nginx on $PORT and forwards
+    # it here, or - with no nginx in the image - exports PANEL_PORT=$PORT itself.
+    log.info("routing: panel=%s:%s (platform PORT=%s)",
+             ",".join(config.PANEL_BIND_HOSTS), config.PANEL_PORT, config.PUBLIC_PORT)
+    uvicorn.Server(uvicorn.Config(
         "app.main:app",
-        host="0.0.0.0",
+        host=config.PANEL_HOST,
         port=config.PANEL_PORT,
         log_level="info",
         # uvicorn defaults to proxy_headers=True with forwarded_allow_ips
@@ -2095,4 +2139,4 @@ if __name__ == "__main__":
         # controlled too - the panel parses XFF itself (see _client_ip), so the
         # middleware must not do it a second time.
         proxy_headers=False,
-    )
+    )).run(sockets=_listen_sockets(config.PANEL_BIND_HOSTS, config.PANEL_PORT))

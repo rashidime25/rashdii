@@ -1,5 +1,6 @@
 """Runtime configuration derived from environment variables."""
 import os
+import socket
 
 # Directory that holds the SQLite DB and generated Xray config.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,6 +45,44 @@ PUBLIC_PORT = int(os.environ.get("PORT", "8000"))
 
 # Ports for the internal services (localhost only).
 PANEL_PORT = int(os.environ.get("PANEL_PORT", "10000"))
+
+
+def _ipv6_available() -> bool:
+    """True when this kernel can bind an IPv6 socket at all."""
+    try:
+        probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    except OSError:
+        return False
+    try:
+        probe.bind(("::", 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def _panel_hosts() -> list:
+    """Every address family the panel must answer on.
+
+    Serving one family is invisible from inside the container: a healthcheck on
+    127.0.0.1 passes, the logs stay clean, and the admin sees only "Application
+    failed to respond" from the platform edge, which may be dialling the other
+    family. So the panel binds both whenever the kernel offers both.
+
+    They are two sockets, not one v4-mapped socket: asyncio sets IPV6_V6ONLY on
+    the socket it binds, so `uvicorn --host ::` is IPv6-*only* - the trap that
+    turns "add IPv6 support" into "IPv4 stops working". See app.main.
+    """
+    explicit = (os.environ.get("PANEL_HOST") or "").strip()
+    if explicit:
+        return [explicit]
+    return ["0.0.0.0", "::"] if _ipv6_available() else ["0.0.0.0"]
+
+
+PANEL_BIND_HOSTS = _panel_hosts()
+#: The primary address, for logs (the full list is above).
+PANEL_HOST = PANEL_BIND_HOSTS[0]
 XRAY_VLESS_WS_PORT = int(os.environ.get("XRAY_VLESS_WS_PORT", "10001"))
 XRAY_VMESS_WS_PORT = int(os.environ.get("XRAY_VMESS_WS_PORT", "10002"))
 XRAY_TROJAN_WS_PORT = int(os.environ.get("XRAY_TROJAN_WS_PORT", "10003"))
