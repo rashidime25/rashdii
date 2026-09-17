@@ -83,34 +83,6 @@ async def _housekeeping():
             await asyncio.sleep(5)
 
 
-async def _xray_watchdog():
-    """Keep the engine alive.
-
-    Until now nothing noticed when Xray died: the panel stayed up, links kept
-    being handed out, and no traffic could pass. Every cycle we check the process
-    we spawned and bring it back, recording an event + exit code so the admin can
-    see *that* it happened and *why*.
-    """
-    # first pass quickly after boot, then on the configured cadence
-    await asyncio.sleep(min(15, config.XRAY_WATCHDOG_INTERVAL))
-    while True:
-        try:
-            await asyncio.sleep(config.XRAY_WATCHDOG_INTERVAL)
-            if not xray.xray_available():
-                continue
-            if xray.xray_running():
-                # cheap extra check: is the config on disk still the one running?
-                continue
-            ok, reason = xray.ensure_running()
-            if not ok:
-                db.add_event("error", "xray-down", f"watchdog could not restart Xray ({reason})")
-                await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            break
-        except Exception:  # noqa: BLE001
-            await asyncio.sleep(5)
-
-
 async def _keep_alive():
     """Ping the public panel port periodically so serverless/cloud hosts stay warm."""
     await asyncio.sleep(20)
@@ -213,7 +185,6 @@ async def _enrich_node_locations():
 def start_background_tasks(app):
     tasks = [
         asyncio.create_task(_periodic_flush()),
-        asyncio.create_task(_xray_watchdog()),
         asyncio.create_task(_housekeeping()),
         asyncio.create_task(_keep_alive()),
         asyncio.create_task(_refresh_location()),

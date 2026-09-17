@@ -20,54 +20,21 @@ log = logging.getLogger("titan.reality")
 
 
 def _xray_x25519() -> tuple[str, str] | None:
-    """Return (private_key, public_key) from `xray x25519`, or None.
-
-    Xray changed this output between releases:
-
-        old (<= 24.x)   "Private key: <b64>"  /  "Public key: <b64>"
-        new (>= 25.x)   "PrivateKey: <b64>"   /  "Password (PublicKey): <b64>"
-                                              (+ optional "Hash32: <b64>")
-
-    The strict match on the old spelling silently returned None against current
-    Xray builds, which meant no keypair was ever generated: every Reality link
-    was emitted with an empty ``pbk=`` and the Reality inbound was skipped
-    entirely. Parse by label instead of by exact string, keep the old spelling
-    working, and derive the public key from the private one as a fallback.
-    """
-    import re as _re
-
-    def run(args):
-        try:
-            return subprocess.run([config.XRAY_BIN, *args], capture_output=True,
-                                  text=True, timeout=20).stdout or ""
-        except Exception as e:  # noqa: BLE001
-            log.warning("xray %s failed: %s", " ".join(args), e)
-            return ""
-
+    """Return (private_key, public_key) from `xray x25519`, or None."""
+    try:
+        out = subprocess.run(
+            [config.XRAY_BIN, "x25519"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("xray x25519 failed: %s", e)
+        return None
     priv = pub = ""
-    for line in run(["x25519"]).splitlines():
-        if ":" not in line:
-            continue
-        label, _, value = line.partition(":")
-        label = label.strip().lower().replace(" ", "").replace("(", "").replace(")", "")
-        value = value.strip()
-        if len(value) < 40 or not _re.fullmatch(r"[A-Za-z0-9_+/=-]{40,}", value):
-            continue  # not a key (e.g. the "Choose one Authentication" header)
-        if label.startswith("private"):
-            priv = value
-        elif label.startswith("public") or "publickey" in label or label.startswith("password"):
-            pub = value
-
-    if priv and not pub:
-        # `xray x25519 -i <private>` prints the matching public key.
-        for line in run(["x25519", "-i", priv]).splitlines():
-            low = line.strip().lower().replace(" ", "").replace("(", "").replace(")", "")
-            if low.startswith("public") or "publickey" in low:
-                cand = line.split(":", 1)[-1].strip()
-                if len(cand) >= 40:
-                    pub = cand
-                    break
-
+    for line in (out.stdout or "").splitlines():
+        if line.startswith("Private key:"):
+            priv = line.split(":", 1)[1].strip()
+        elif line.startswith("Public key:"):
+            pub = line.split(":", 1)[1].strip()
     if priv and pub:
         return priv, pub
     return None
@@ -81,23 +48,9 @@ def ensure_reality_keys() -> dict | None:
     """
     priv = db.get_meta("reality_priv")
     if priv:
-        pub = db.get_meta("reality_pub") or ""
-        if not pub:
-            # self-heal: a stored private key without its public half (an older
-            # broken version, or a node that synced an empty pub) would keep
-            # publishing links with an empty `pbk=`. Re-derive it.
-            derived = _xray_x25519()
-            if derived and derived[0] == priv:
-                pub = derived[1]
-            elif derived is None:
-                pub = ""
-            if pub:
-                db.set_meta("reality_pub", pub)
-                db.set_setting("reality_pub", pub)
-                log.warning("Reality public key was missing — derived it from the stored private key")
         return {
             "priv": priv,
-            "pub": pub,
+            "pub": db.get_meta("reality_pub") or "",
             "sid": db.get_meta("reality_sid") or "",
             "sni": config.REALITY_SNI,
             "dest": config.REALITY_DEST,
@@ -122,9 +75,6 @@ def ensure_reality_keys() -> dict | None:
 def apply_reality_config(data: dict) -> None:
     """Node side: accept the main panel's reality keypair + short id."""
     if not data or not data.get("priv"):
-        return
-    if not str(data["priv"]).strip():
-        log.warning("reality payload carried an empty private key — ignored")
         return
     db.set_meta("reality_priv", data["priv"])
     db.set_meta("reality_pub", data.get("pub", ""))

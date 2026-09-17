@@ -120,26 +120,6 @@ def _connect() -> sqlite3.Connection:
     return _conn
 
 
-def _archive_retired_user_columns(c, columns: list) -> str:
-    """Write the values of ``columns`` to a JSON file before they are dropped.
-
-    Returns the path (empty when there was nothing worth keeping). Stored outside
-    the DB on purpose: this is a one-time rescue copy, not a feature.
-    """
-    rows = c.execute(f"SELECT uid, {', '.join(columns)} FROM users").fetchall()
-    kept = {}
-    for row in rows:
-        values = {col: row[col] for col in columns if row[col] not in ("", 0, None)}
-        if values:
-            kept[row["uid"]] = values
-    if not kept:
-        return ""
-    path = os.path.join(config.DATA_DIR, f"reverted-user-fields-{int(time.time())}.json")
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(kept, fh, ensure_ascii=False, indent=2)
-    return path
-
-
 def _ensure_bootstrap():
     """Generate secret key / default settings / migrations on first run."""
     c = _conn
@@ -170,26 +150,6 @@ def _ensure_bootstrap():
     if "wg_pub" not in cols:
         c.execute("ALTER TABLE users ADD COLUMN wg_pub TEXT NOT NULL DEFAULT ''")
         c.commit()
-
-    # The per-user "advanced config" columns were reverted. Dropping them (rather
-    # than ignoring them) is what makes the revert real: a column nobody reads
-    # still travels through every SELECT * and every API payload. What the rows
-    # held is written to a JSON file first - silently destroying an admin's data
-    # is not a revert either.
-    present = [col for col in config.RETIRED_USER_COLUMNS if col in cols]
-    if present:
-        try:
-            _archive_retired_user_columns(c, present)
-        except Exception:  # noqa: BLE001 - never let housekeeping block the boot
-            pass
-        for col in present:
-            try:
-                c.execute(f"ALTER TABLE users DROP COLUMN {col}")
-                c.commit()
-            except sqlite3.OperationalError:
-                # SQLite < 3.35 cannot drop a column. Leaving it is harmless: the
-                # API and the UI no longer know the field exists.
-                break
 
     # migration: nodes.token (per-node credential issued by the main panel)
     ncols = [r["name"] for r in c.execute("PRAGMA table_info(nodes)").fetchall()]
@@ -288,33 +248,12 @@ def set_admin(username: str, password_hash: str, salt: str) -> None:
         c.commit()
 
 
-def purge_retired_settings() -> list:
-    """Delete the settings rows this build no longer supports. Returns the keys.
-
-    Not a cosmetic cleanup: get_settings() overlays every stored row on the
-    defaults, so an orphan row would keep travelling to the dashboard (and any
-    client of the API) as if it still meant something.
-    """
-    with _lock:
-        c = _connect()
-        marks = ",".join("?" for _ in config.RETIRED_SETTINGS)
-        rows = c.execute(
-            f"SELECT key FROM settings WHERE key IN ({marks})", config.RETIRED_SETTINGS
-        ).fetchall()
-        if rows:
-            c.execute(f"DELETE FROM settings WHERE key IN ({marks})", config.RETIRED_SETTINGS)
-            c.commit()
-    return sorted(row["key"] for row in rows)
-
-
 def get_settings() -> dict:
     with _lock:
         c = _connect()
         rows = c.execute("SELECT key, value FROM settings").fetchall()
     settings = dict(config.DEFAULT_SETTINGS)
     for row in rows:
-        if row["key"] not in settings:
-            continue  # a retired key must not travel to the UI (see purge_retired_settings)
         try:
             settings[row["key"]] = json.loads(row["value"])
         except (json.JSONDecodeError, TypeError):

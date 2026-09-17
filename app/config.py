@@ -1,6 +1,5 @@
 """Runtime configuration derived from environment variables."""
 import os
-import socket
 
 # Directory that holds the SQLite DB and generated Xray config.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,76 +43,7 @@ XRAY_CONFIG_PATH = os.environ.get(
 PUBLIC_PORT = int(os.environ.get("PORT", "8000"))
 
 # Ports for the internal services (localhost only).
-# Where uvicorn binds inside the container. Precedence matters:
-#   1. an explicit PANEL_PORT (what entrypoint.sh exports after putting nginx on
-#      the platform port),
-#   2. otherwise the platform's own PORT - because a start command that runs the
-#      app directly (no nginx, a platform override, a stripped Procfile) would
-#      otherwise bind 10000 while the edge waits on PORT, and the only symptom is
-#      the least debuggable error there is: "Application failed to respond".
-#   3. the historical default.
-def _panel_port() -> int:
-    for key in ("PANEL_PORT", "PORT"):
-        raw = (os.environ.get(key) or "").strip()
-        if raw.isdigit() and 1 <= int(raw) <= 65535:
-            return int(raw)
-    return 10000
-
-
-PANEL_PORT = _panel_port()
-
-
-def _ipv6_available() -> bool:
-    """True when this kernel can bind an IPv6 socket at all."""
-    try:
-        probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-    except OSError:
-        return False
-    try:
-        probe.bind(("::", 0))
-        return True
-    except OSError:
-        return False
-    finally:
-        probe.close()
-
-
-def _panel_hosts() -> list:
-    """Every address family the panel must answer on.
-
-    Serving one family is invisible from inside the container: a healthcheck on
-    127.0.0.1 passes, the logs stay clean, and the admin sees only "Application
-    failed to respond" from the platform edge, which may be dialling the other
-    family. So the panel binds both whenever the kernel offers both.
-
-    They are two sockets, not one v4-mapped socket: asyncio sets IPV6_V6ONLY on
-    the socket it binds, so `uvicorn --host ::` is IPv6-*only* - the trap that
-    turns "add IPv6 support" into "IPv4 stops working". See app.main.
-    """
-    explicit = (os.environ.get("PANEL_HOST") or "").strip()
-    if explicit:
-        return [explicit]
-    return ["0.0.0.0", "::"] if _ipv6_available() else ["0.0.0.0"]
-
-
-#: Panel settings that were once stored but are no longer supported. A row in
-#: the DB would keep being echoed by GET /api/settings (and shown in the UI) even
-#: though nothing reads it any more, so it is dropped once at boot - a revert
-#: that leaves ghosts behind is not a revert.
-#: users.* columns that came from the same reverted feature set. They are dropped
-#: from the database once (see db._ensure_bootstrap) - a column nobody reads still
-#: shows up in every SELECT * and every API payload.
-RETIRED_USER_COLUMNS = ("recipe", "flow", "reality_sni", "policy_level", "mux_enabled")
-
-RETIRED_SETTINGS = (
-    "reality_server_names", "sock_tfo", "sock_nodelay", "sock_keepalive",
-    "sock_user_timeout", "sock_congestion", "xhttp_mode", "xhttp_padding",
-    "xhttp_max_post", "xhttp_xmux", "link_test_target",
-)
-
-PANEL_BIND_HOSTS = _panel_hosts()
-#: The primary address, for logs/health payloads (the full list is above).
-PANEL_HOST = PANEL_BIND_HOSTS[0]
+PANEL_PORT = int(os.environ.get("PANEL_PORT", "10000"))
 XRAY_VLESS_WS_PORT = int(os.environ.get("XRAY_VLESS_WS_PORT", "10001"))
 XRAY_VMESS_WS_PORT = int(os.environ.get("XRAY_VMESS_WS_PORT", "10002"))
 XRAY_TROJAN_WS_PORT = int(os.environ.get("XRAY_TROJAN_WS_PORT", "10003"))
@@ -206,14 +136,6 @@ XRAY_BIN = os.environ.get("XRAY_BIN", "/usr/local/bin/xray")
 
 # Where Xray's own stdout/stderr goes (diagnostics).
 XRAY_LOG_PATH = os.environ.get("TITAN_XRAY_LOG", os.path.join(DATA_DIR, "xray.log"))
-# Watchdog: how often to check that the engine is still alive (seconds).
-XRAY_WATCHDOG_INTERVAL = int(os.environ.get("TITAN_XRAY_WATCHDOG_INTERVAL", "30"))
-# A user counts as "online" when traffic was seen within this window (seconds).
-ONLINE_WINDOW = int(os.environ.get("TITAN_ONLINE_WINDOW", "60"))
-# The Xray version the image is pinned to; shown in the panel for verification.
-XRAY_PINNED_VERSION = os.environ.get("TITAN_XRAY_VERSION", "26.9.9")
-# Set to 1 to hide user count / WG key from the unauthenticated /health payload.
-HEALTH_MINIMAL = os.environ.get("TITAN_HEALTH_MINIMAL", "") == "1"
 
 # Session cookie.
 SESSION_COOKIE = "titan_session"

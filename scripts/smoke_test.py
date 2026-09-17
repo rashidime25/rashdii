@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Quick end-to-end smoke test against a running TiTaN instance (mock mode)."""
-import os
 import sys
-
 import httpx
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
@@ -16,12 +14,8 @@ def main():
     print("needs_setup:", st["needs_setup"])
     assert st["needs_setup"] is False
 
-    # Log in with the default admin. The seeded credentials are TiTaN/TiTaN
-# (TITAN_ADMIN_USER / TITAN_ADMIN_PASS); this script used to post an empty
-# password and therefore always failed with 401 against a real instance.
-    admin_user = os.environ.get("TITAN_ADMIN_USER", "TiTaN")
-    admin_pass = os.environ.get("TITAN_ADMIN_PASS", "TiTaN")
-    r = c.post(f"{BASE}/api/login", json={"username": admin_user, "password": admin_pass})
+    # log in with the default admin ("TiTaN", no password until one is set)
+    r = c.post(f"{BASE}/api/login", json={"username": "TiTaN", "password": ""})
     assert r.status_code == 200, r.text
     c.cookies.set("titan_session", r.cookies.get("titan_session"))
     print("logged in (default admin)")

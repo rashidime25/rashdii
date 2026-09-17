@@ -76,36 +76,6 @@ def booted(tmp_path, extra_env: dict | None = None):
         log.close()
 
 
-def _ipv6_available() -> bool:
-    try:
-        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-    except OSError:
-        return False
-    try:
-        s.bind(("::1", 0))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
-
-
-def test_the_panel_answers_on_ipv4_and_ipv6(live):
-    """The platform edge picks the family, not us.
-
-    A panel that answers on 127.0.0.1 but refuses `::1` looks perfectly healthy
-    from the inside and is a 502 from outside, so both are asserted against a
-    real server rather than a TestClient.
-    """
-    import urllib.parse
-
-    port = urllib.parse.urlsplit(live).port
-    assert httpx.get(f"{live}/health", timeout=5).status_code == 200
-    if not _ipv6_available():
-        pytest.skip("no IPv6 in this environment")
-    assert httpx.get(f"http://[::1]:{port}/health", timeout=5).status_code == 200
-
-
 @pytest.fixture()
 def live(tmp_path):
     with booted(tmp_path) as base:

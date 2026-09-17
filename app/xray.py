@@ -5,9 +5,7 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
-import time
 
 from . import config, db, sskeys
 from . import nodes as nodesync
@@ -17,58 +15,6 @@ log = logging.getLogger("titan.xray")
 _previous_stats: dict[str, dict] = {}
 _xray_process: subprocess.Popen | None = None
 _stats_lock = asyncio.Lock()
-_version_cache: str = ""
-_last_exit: dict = {}
-
-
-class ConfigError(RuntimeError):
-    """The freshly generated config did not pass `xray run -test`.
-
-    Nothing was written or restarted: the previously working config keeps
-    serving traffic. Callers may surface ``str(exc)`` to the admin.
-    """
-
-
-def xray_version() -> str:
-    """`Xray 26.9.9 …` — cached, shown in the UI so a pinned version is visible."""
-    global _version_cache
-    if _version_cache or not xray_available():
-        return _version_cache
-    try:
-        out = subprocess.run([config.XRAY_BIN, "version"], capture_output=True,
-                             text=True, timeout=15).stdout or ""
-        _version_cache = out.splitlines()[0].strip() if out.strip() else ""
-    except Exception as e:  # noqa: BLE001
-        log.warning("xray version failed: %s", e)
-    return _version_cache
-
-
-def verify_config(path: str | None = None) -> tuple[bool, str]:
-    """Validate a config file with the engine itself (`xray run -test`).
-
-    Used before applying anything: a typo in an admin setting or a key the
-    engine no longer accepts must never replace a config that is currently
-    serving users.
-    """
-    path = path or config.XRAY_CONFIG_PATH
-    if not xray_available() or not os.path.exists(path):
-        return True, "skipped (no binary or no config)"
-    try:
-        proc = subprocess.run([config.XRAY_BIN, "run", "-test", "-c", path],
-                              capture_output=True, text=True, timeout=30)
-    except Exception as e:  # noqa: BLE001
-        return False, f"xray -test failed to run: {e}"
-    if proc.returncode == 0:
-        return True, ""
-    detail = (proc.stdout + proc.stderr).strip()
-    # keep the useful part: the engine prints the failing line last
-    lines = [ln for ln in detail.splitlines() if ln.strip()]
-    return False, (lines[-1] if lines else "unknown config error")[:400]
-
-
-def last_exit() -> dict:
-    """How/when the engine last died — used by the watchdog + diagnostics."""
-    return dict(_last_exit)
 
 
 def xray_available() -> bool:
@@ -116,10 +62,8 @@ def generate_xray_config() -> dict:
     users = _xray_users()
     settings = db.get_settings()
 
-    def mk_client(u, flow: str = ""):
+    def mk_client(u):
         c = {"id": u["uuid"], "email": u["uid"]}
-        if flow:
-            c["flow"] = flow
         if u.get("password"):
             c["password"] = u["password"]
         return c
@@ -314,12 +258,7 @@ def generate_xray_config() -> dict:
                        if u["protocol"] == "vless" and (u.get("security") or "none") == "none"]
     vless_tcp_tls = [mk_client(u) for u in tcp_users
                      if u["protocol"] == "vless" and (u.get("security") or "") == "tls"]
-    # The links built for this inbound advertise `flow=xtls-rprx-vision`. If the
-    # server-side user carries no flow, a real client that follows its own link
-    # opens a Vision tunnel the server refuses to carry: the connection is
-    # established in the client UI but no traffic ever passes (verified against a
-    # real Xray client). Keep both sides in sync.
-    vless_tcp_reality = [mk_client(u, flow="xtls-rprx-vision") for u in tcp_users
+    vless_tcp_reality = [mk_client(u) for u in tcp_users
                          if u["protocol"] == "vless" and (u.get("security") or "") == "reality"]
     vmess_tcp_plain = [mk_client(u) for u in tcp_users
                        if u["protocol"] == "vmess" and (u.get("security") or "none") == "none"]
@@ -495,10 +434,7 @@ def generate_xray_config() -> dict:
         "api": {"tag": "api", "services": ["StatsService"]},
         "stats": {},
         "policy": {
-            # statsUserOnline feeds `xray api statsonline(iplist)` — the only way
-            # to know who is really connected (state.ACTIVE never was populated).
-            "levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True,
-                             "statsUserOnline": True}},
+            "levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True}},
             "system": {"statsInboundUplink": True, "statsInboundDownlink": True},
         },
         "inbounds": inbounds,
@@ -507,40 +443,12 @@ def generate_xray_config() -> dict:
     }
 
 
-def write_xray_config(validate: bool = True) -> dict:
-    """Generate the config and put it in place — but only if it is valid.
-
-    The previous config is kept as ``config.json.bak``, and an invalid candidate
-    is rejected *before* it can replace a working configuration (``ConfigError``),
-    so a bad setting or a key the engine rejects cannot take the proxy down.
-    """
+def write_xray_config() -> dict:
     cfg = generate_xray_config()
     os.makedirs(os.path.dirname(config.XRAY_CONFIG_PATH), exist_ok=True)
-    # The candidate must keep a `.json` suffix: `xray run -test` infers the config
-    # format from the file extension and refuses anything else
-    # ("Failed to get format of config.json.tmp" — hit while testing this fix).
-    tmp = config.XRAY_CONFIG_PATH[:-5] + ".candidate.json" \
-        if config.XRAY_CONFIG_PATH.endswith(".json") else config.XRAY_CONFIG_PATH + ".candidate.json"
+    tmp = config.XRAY_CONFIG_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
-
-    if validate:
-        ok, detail = verify_config(tmp)
-        if not ok:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-            db.add_event("error", "config-invalid",
-                         f"config rejected by `xray run -test`: {detail}"[:300])
-            log.error("generated Xray config is invalid, keeping the running one: %s", detail)
-            raise ConfigError(detail)
-
-    if os.path.exists(config.XRAY_CONFIG_PATH):
-        try:
-            shutil.copyfile(config.XRAY_CONFIG_PATH, config.XRAY_CONFIG_PATH + ".bak")
-        except OSError:
-            pass
     os.replace(tmp, config.XRAY_CONFIG_PATH)
     return cfg
 
@@ -564,34 +472,6 @@ def restart_xray():
         log.info("Xray restarted (pid=%s)", _xray_process.pid)
     else:
         log.warning("Xray binary not found — running in dev/mock mode.")
-
-
-def ensure_running() -> tuple[bool, str]:
-    """Start the engine if it is not alive. Returns (ok, reason).
-
-    The watchdog calls this; a panel that stays up while Xray is dead is the
-    worst failure mode there is (nobody can connect and nobody is told).
-    """
-    global _last_exit
-    if not xray_available():
-        return False, "no-binary"
-    if xray_running():
-        return True, "alive"
-
-    code = None
-    if _xray_process is not None:
-        code = _xray_process.poll()
-        _last_exit = {"code": code, "at": time.time()}
-        log.warning("Xray is not running (exit code %s) — restarting it", code)
-
-    if not os.path.exists(config.XRAY_CONFIG_PATH):
-        write_xray_config()
-    restart_xray()
-    if xray_running():
-        db.add_event("warn", "xray-restart",
-                     f"engine was down (exit={code}) and has been restarted")
-        return True, "restarted"
-    return False, "restart-failed"
 
 
 async def get_xray_stats() -> dict:
