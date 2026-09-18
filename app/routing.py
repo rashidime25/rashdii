@@ -422,10 +422,23 @@ def _panel_target(u: dict, stored_t: str, stored_s: str, warnings: list, reason:
     """The panel's own edge holds the link — see main._edge_link_view for the map."""
     if config.tcp_proxy() and is_raw_transport(stored_t, stored_s):
         # A platform TCP proxy is the one route a raw port has on an HTTP-only
-        # deployment, and it is shared by the whole service.
-        return {"target": "panel", "node": None, "transport": "tcp", "security": stored_s,
-                "raw_port": config.tcp_proxy()[1], "warnings": warnings,
-                "reasons": [reason, "tcp-proxy"]}
+        # deployment — but it forwards to a single container port, so it may only
+        # advertise configs that need *that* port. Handing it to any other raw
+        # transport points the client at an inbound its handshake does not belong
+        # to, which is a guaranteed timeout.
+        proxy_host, proxy_port = config.tcp_proxy()
+        wanted = raw_port(u.get("protocol") or "vless", stored_s)
+        if config.tcp_proxy_carries(wanted):
+            return {"target": "panel", "node": None, "transport": "tcp", "security": stored_s,
+                    "raw_port": proxy_port, "warnings": warnings,
+                    "reasons": [reason, "tcp-proxy"]}
+        carries = getattr(config, "TCP_APP_PORT", 0) or "unknown"
+        warnings.append(
+            f"the platform TCP proxy ({proxy_host}:{proxy_port}) forwards to container port "
+            f"{carries}, but this config needs port {wanted}: the link goes over the HTTPS edge "
+            f"instead ({'xhttp' if (u.get('protocol') or 'vless') in ('vless', 'vmess') else 'ws'}"
+            f"+TLS), which always connects. Move the TCP proxy to {wanted} to keep it raw."
+        )
     mapped_t, mapped_s, extra = edge_view(stored_t, stored_s, u.get("protocol") or "vless")
     warnings.extend(extra)
     return {"target": "panel", "node": None, "transport": mapped_t, "security": mapped_s,

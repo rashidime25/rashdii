@@ -1722,7 +1722,16 @@ async def api_edge_check(request: Request, _: str = Depends(_require_auth)):
         "ok": True,
         "edge_http_only": config.EDGE_HTTP_ONLY,
         "proxy_in_front": in_front,
-        "tcp_proxy": (lambda p: {"host": p[0], "port": p[1]} if p else None)(config.tcp_proxy()),
+        "tcp_proxy": (lambda p: {"host": p[0], "port": p[1],
+                                 "application_port": getattr(config, "TCP_APP_PORT", 0) or None,
+                                 "carries": sorted(
+                                     f"{name}={getattr(config, name)}"
+                                     for name in (
+                                         "XRAY_TCP_VLESS_PORT", "XRAY_TCP_VLESS_TLS_PORT",
+                                         "XRAY_TCP_VLESS_REALITY_PORT", "XRAY_TCP_VMESS_PORT",
+                                         "XRAY_TCP_VMESS_TLS_PORT", "XRAY_TCP_TROJAN_PORT")
+                                     if config.tcp_proxy_carries(getattr(config, name))),
+                                 } if p else None)(config.tcp_proxy()),
         "public": {"host": host, "port": port},
         "transports": results,
         "raw_ports": raw_ports,
