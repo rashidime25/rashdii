@@ -73,14 +73,64 @@ def test_a_stored_raw_config_is_link_mapped(admin, make_user, edge_only, monkeyp
 
 
 def test_a_tcp_proxy_brings_raw_transports_back(admin, make_user, monkeypatch):
-    """Railway injects RAILWAY_TCP_PROXY_* once a TCP proxy exists - one variable
-    decides whether Reality is advertised as Reality."""
+    """Railway injects RAILWAY_TCP_PROXY_* once a TCP proxy exists, including the
+    container port it forwards to - that triple is what makes Reality real again."""
     monkeypatch.setattr(config, "EDGE_HTTP_ONLY", True)
     monkeypatch.setattr(config, "TCP_PROXY_DOMAIN", "shuttle.proxy.rlwy.net")
     monkeypatch.setattr(config, "TCP_PROXY_PORT", 23456)
+    monkeypatch.setattr(config, "TCP_APP_PORT", config.XRAY_TCP_VLESS_REALITY_PORT)
     u = make_user(protocol="vless", transport="tcp", security="reality")
     assert u["transport"] == "tcp" and u["security"] == "reality"
     assert "shuttle.proxy.rlwy.net:23456" in u["main_link"], u["main_link"]
+
+
+def test_a_tcp_proxy_never_advertises_a_port_it_does_not_carry(admin, make_user, monkeypatch):
+    """One proxy carries one port, and the panel has six raw ones.
+
+    The proxy forwards to container port 10009 (VLESS+Reality). A VMess/TCP
+    config needs 10010, so the proxy is the last place it may be sent: the client
+    would dial Reality with a VMess handshake and hang until it timed out. The
+    link falls back to the HTTPS edge, which connects, and the admin is told
+    exactly which two ports disagree.
+    """
+    monkeypatch.setattr(config, "EDGE_HTTP_ONLY", True)
+    monkeypatch.setattr(config, "TCP_PROXY_DOMAIN", "shuttle.proxy.rlwy.net")
+    monkeypatch.setattr(config, "TCP_PROXY_PORT", 23456)
+    monkeypatch.setattr(config, "TCP_APP_PORT", config.XRAY_TCP_VLESS_REALITY_PORT)
+    assert config.tcp_proxy_carries(config.XRAY_TCP_VLESS_REALITY_PORT) is True
+    assert config.tcp_proxy_carries(config.XRAY_TCP_VMESS_PORT) is False
+
+    u = make_user(protocol="vmess", transport="tcp", security="none")
+    # vmess links are base64(JSON) - look at what the client would actually read.
+    import base64
+    import json
+    payload = json.loads(base64.b64decode(u["main_link"].split("://", 1)[1] + "=="))
+    assert payload["add"] != "shuttle.proxy.rlwy.net", payload
+    assert payload["net"] == "xhttp" and payload["tls"] == "tls", payload
+    mismatch = " ".join(u.get("edge_warnings") or [])
+    assert str(config.XRAY_TCP_VMESS_PORT) in mismatch, mismatch
+    assert str(config.XRAY_TCP_VLESS_REALITY_PORT) in mismatch, mismatch
+
+    # ... and a config that needs exactly that port does get the proxy.
+    r = make_user(protocol="vless", transport="tcp", security="reality")
+    assert "shuttle.proxy.rlwy.net:23456" in r["main_link"], r["main_link"]
+
+
+def test_an_unknown_proxy_target_is_never_guessed(admin, make_user, monkeypatch):
+    """No platform told us which port the proxy carries: never guess.
+
+    Guessing is how a config ends up hanging; falling back is not — the edge
+    path always connects. TITAN_TCP_PROXY_APP_PORT is the way to declare it.
+    """
+    monkeypatch.setattr(config, "EDGE_HTTP_ONLY", True)
+    monkeypatch.setattr(config, "TCP_PROXY_DOMAIN", "shuttle.proxy.rlwy.net")
+    monkeypatch.setattr(config, "TCP_PROXY_PORT", 23456)
+    monkeypatch.setattr(config, "TCP_APP_PORT", 0)
+    u = make_user(protocol="vless", transport="tcp", security="reality")
+    assert "shuttle.proxy.rlwy.net" not in u["main_link"], u["main_link"]
+    assert "type=xhttp" in u["main_link"], u["main_link"]
+    assert any("TCP proxy" in w and "unknown" in w for w in (u.get("edge_warnings") or [])), \
+        u.get("edge_warnings")
 
 
 def _serving_node(admin, node_id, uid):
@@ -182,6 +232,14 @@ def test_edge_check_names_the_cause(admin, edge_only):
     for _name, info in data["transports"].items():
         assert "status" in info and "alive" in info
     assert data["raw_ports"]["XRAY_TCP_VLESS_REALITY_PORT"] == config.XRAY_TCP_VLESS_REALITY_PORT
+    # ... and the TCP proxy block says *which* container port it carries, so the
+    # dashboard can tell the admin why a raw config did or did not use it.
+    proxy = data["tcp_proxy"]
+    if config.tcp_proxy():
+        assert proxy["host"] and proxy["port"]
+        assert "application_port" in proxy and "carries" in proxy
+    else:
+        assert proxy is None
     assert "TCP proxy" in data["note"] or "TCP proxy" in data["note"]
 
 

@@ -140,12 +140,42 @@ try:
 except ValueError:
     TCP_PROXY_PORT = 0
 
+#: The container port the proxy actually forwards to. Platforms inject it
+#: (Railway: RAILWAY_TCP_APPLICATION_PORT); anywhere else it can be declared
+#: with TITAN_TCP_PROXY_APP_PORT. 0 means "nobody told us".
+try:
+    TCP_APP_PORT = int(os.environ.get("TITAN_TCP_PROXY_APP_PORT")
+                       or os.environ.get("RAILWAY_TCP_APPLICATION_PORT") or 0)
+except ValueError:
+    TCP_APP_PORT = 0
+
 
 def tcp_proxy() -> tuple | None:
     """(host, port) of the platform TCP proxy, or None when there is none."""
     if TCP_PROXY_DOMAIN and 1 <= TCP_PROXY_PORT <= 65535:
         return TCP_PROXY_DOMAIN, TCP_PROXY_PORT
     return None
+
+
+def tcp_proxy_carries(port: int) -> bool:
+    """Does the public TCP proxy forward to exactly ``port``?
+
+    One proxy carries one port. Writing its host:port into a config that needs a
+    *different* port sends the client into whichever inbound the proxy really
+    points at, where its handshake is meaningless and the connection hangs until
+    the client times out — so this only ever says yes about a proven match.
+
+    Unknown means no: the fallback (XHTTP/TLS over the HTTPS edge) connects
+    everywhere, and the admin is told both ports, so a wrong guess can never
+    turn into a dead config. TITAN_TCP_PROXY_APP_PORT declares it by hand on a
+    platform that does not inject one.
+    """
+    if not tcp_proxy():
+        return False
+    try:
+        return int(port) > 0 and int(port) == int(TCP_APP_PORT)
+    except (TypeError, ValueError):
+        return False
 
 
 #: Transports the HTTP edge can carry end to end (the container's nginx proxies
