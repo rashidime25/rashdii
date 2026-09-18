@@ -249,3 +249,36 @@ def test_the_public_host_used_for_links_is_never_a_raw_port(make_user, edge_only
     assert _no_raw_port(u["qr_data"])
     for link in u["links"]:
         assert _no_raw_port(link), link
+
+
+def test_the_endpoint_shown_to_the_admin_matches_the_link(admin, make_user, monkeypatch):
+    """The dashboard line must describe the link that was actually handed out.
+
+    The proxy here carries the *Reality* port and this user needs the plain VLESS
+    one, so the row stays raw in the database and the link is remapped at build
+    time - which is exactly the case the admin has to be able to see: the modal
+    says XHTTP/TLS, on the edge port, with the reason, instead of leaving him to
+    infer it from a client that times out.
+    """
+    monkeypatch.setattr(config, "EDGE_HTTP_ONLY", True)
+    monkeypatch.setattr(config, "TCP_PROXY_DOMAIN", "shuttle.proxy.rlwy.net")
+    monkeypatch.setattr(config, "TCP_PROXY_PORT", 23456)
+    monkeypatch.setattr(config, "TCP_APP_PORT", config.XRAY_TCP_VLESS_REALITY_PORT)
+    u = make_user(protocol="vless", transport="tcp", security="none")
+    got = admin.get(f"/api/users/{u['uid']}", headers=H).json()
+    ep = got["endpoint"]
+    assert ep["target"] == "panel" and ep["host"]
+    assert ep["raw"] is False, ep            # remapped: not raw any more
+    assert ep["transport"] == "xhttp" and ep["security"] == "tls", ep
+    assert ep["host"] != "shuttle.proxy.rlwy.net", ep
+    assert f":{ep['port']}" in got["main_link"], (ep, got["main_link"])
+    assert got["edge_warnings"], "the reason must travel with the endpoint"
+    assert ep["reasons"], ep
+
+    # ... and with the platform proxy carrying exactly that port, it *is* raw,
+    # and the endpoint names the proxy the client will dial.
+    monkeypatch.setattr(config, "TCP_APP_PORT", config.XRAY_TCP_VLESS_PORT)
+    ep2 = admin.get(f"/api/users/{u['uid']}", headers=H).json()["endpoint"]
+    assert ep2["raw"] is True and ep2["transport"] == "tcp", ep2
+    assert ep2["host"] == "shuttle.proxy.rlwy.net" and ep2["port"] == 23456, ep2
+    assert "tcp-proxy" in ep2["reasons"], ep2
