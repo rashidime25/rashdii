@@ -648,6 +648,22 @@ def _serialize_user(u: dict, with_links: bool = False, request: Request | None =
         out["sub_url"] = f"https://{panel_host}/sub/{u['uid']}"
         out["status_url"] = f"https://{panel_host}/status/{u['uid']}"
         out["qr_data"] = links["main"]
+        # Where the link actually lands, decided once and reported as such: the
+        # dashboard shows this instead of leaving the admin to guess why a raw
+        # config went out as XHTTP/TLS (or the other way round).
+        plan = routing.serving(u)
+        host, port = _user_endpoint(u, request, plan)
+        out["endpoint"] = {
+            "host": host,
+            "port": port,
+            "target": plan.get("target") or "panel",
+            "node": (plan.get("node") or {}).get("name") or "",
+            "transport": plan.get("transport") or u.get("transport") or "",
+            "security": plan.get("security") or u.get("security") or "",
+            "raw": routing.is_raw_transport(plan.get("transport") or "",
+                                            plan.get("security") or ""),
+            "reasons": list(plan.get("reasons") or []),
+        }
     return out
 
 

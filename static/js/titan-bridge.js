@@ -582,6 +582,7 @@
         </div>
         <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">سرور<select id="mu_node" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">${nodeOpts}</select></label>
         <div id="mu_nodeHint" class="node-hint"></div>
+        <div id="mu_edgeState" class="node-hint" style="display:none"></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
           <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">پروتکل<select id="mu_protocol" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">${protocols.map(p=>`<option value="${p}" ${ (u.protocol||'vless')===p?'selected':''}>${p.toUpperCase()}</option>`).join('')}</select></label>
           <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">انتقال<select id="mu_transport" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">${transports.map(t=>`<option value="${t}" ${(u.transport||settings.default_transport||'ws')===t?'selected':''}>${t.toUpperCase()}</option>`).join('')}</select></label>
@@ -654,6 +655,24 @@
       const paint=()=>{ if(!nodeSel||!hint) return; const h=nodeHint(nodeSel.value); hint.textContent=h.text; hint.className='node-hint '+(h.cls||''); };
       if(nodeSel) nodeSel.addEventListener('change',paint);
       paint();
+      // Where this config really lands. A stored "reality/tcp" can legitimately
+      // be served as XHTTP/TLS on the edge (or as raw TCP through the platform
+      // proxy) - the panel decides that from evidence, and this is where the
+      // decision and its reason are readable instead of being a surprise later.
+      const state=$('#mu_edgeState',overlay);
+      if(state){
+        const ep=(existing&&existing.endpoint)||null;
+        const warns=((existing&&existing.edge_warnings)||[]).filter(Boolean);
+        if(ep&&ep.host){
+          const tags=[esc(String(ep.transport||'').toUpperCase())+'/'+esc(String(ep.security||'').toUpperCase())];
+          tags.push(ep.raw?'خام (TCP)':'از مسیر HTTPS');
+          if(ep.target==='node'&&ep.node) tags.push('روی '+esc(ep.node));
+          state.innerHTML=`<b>${tags.join(' · ')}</b> <span dir="ltr">${esc(ep.host)}:${esc(String(ep.port))}</span>`
+            +(warns.length?('<br>'+warns.map(w=>'• '+esc(w)).join('<br>')):'');
+          state.className='node-hint '+(warns.length?'warn':'ok');
+          state.style.display='block';
+        }
+      }
     }, 20);
   }
 
