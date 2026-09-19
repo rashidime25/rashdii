@@ -170,6 +170,16 @@ def _ensure_bootstrap():
         c.execute("ALTER TABLE users ADD COLUMN sub_transports TEXT NOT NULL DEFAULT ''")
         c.commit()
 
+    # migration: subscriptions.avatar / plan — the profile the dashboard sets for
+    # a *link* (its own picture and label), shown on the public page.
+    scols = [r["name"] for r in c.execute("PRAGMA table_info(subscriptions)").fetchall()]
+    if "avatar" not in scols:
+        c.execute("ALTER TABLE subscriptions ADD COLUMN avatar TEXT NOT NULL DEFAULT ''")
+        c.commit()
+    if "plan" not in scols:
+        c.execute("ALTER TABLE subscriptions ADD COLUMN plan TEXT NOT NULL DEFAULT ''")
+        c.commit()
+
     # migration: nodes.token (per-node credential issued by the main panel)
     ncols = [r["name"] for r in c.execute("PRAGMA table_info(nodes)").fetchall()]
     if "token" not in ncols:
@@ -626,14 +636,15 @@ def get_subscription_by_token(token: str) -> dict | None:
     return _sub_row(row) if row else None
 
 
-def create_subscription(name: str, token: str, items, note: str = "", enabled: bool = True) -> dict:
+def create_subscription(name: str, token: str, items, note: str = "", enabled: bool = True,
+                        avatar: str = "", plan: str = "") -> dict:
     payload = json.dumps(items or [], ensure_ascii=False)
     with _lock:
         c = _connect()
         cur = c.execute(
-            "INSERT INTO subscriptions(name, token, items, enabled, note, created_at) "
-            "VALUES(?,?,?,?,?,?)",
-            (name, token, payload, 1 if enabled else 0, note, time.time()),
+            "INSERT INTO subscriptions(name, token, items, enabled, note, created_at, avatar, plan) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (name, token, payload, 1 if enabled else 0, note, time.time(), avatar or "", plan or ""),
         )
         c.commit()
         new_id = cur.lastrowid
@@ -641,7 +652,7 @@ def create_subscription(name: str, token: str, items, note: str = "", enabled: b
 
 
 def update_subscription(sub_id: int, fields: dict) -> dict | None:
-    allowed = {"name", "items", "enabled", "note", "token"}
+    allowed = {"name", "items", "enabled", "note", "token", "avatar", "plan"}
     sets, vals = [], []
     for key, value in fields.items():
         if key not in allowed:

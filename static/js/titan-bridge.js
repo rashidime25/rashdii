@@ -25,6 +25,7 @@
     sliders:'<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h9M17 18h3"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="15" cy="18" r="2"/>',
     checks:'<path d="M3 7.5 6 10.5l4.5-5M12 8h9M3 17.5 6 20.5l4.5-5M12 18h9"/>',
     xcircle:'<circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>',
+    image:'<rect x="3" y="4" width="18" height="16" rx="2.6"/><circle cx="8.6" cy="9.6" r="1.7"/><path d="M4.2 17.6 9.4 12l3.9 3.7 2.9-2.5 3.5 3.3"/>',
   };
   function icon(name, size=17, width=1.8){
     const body = ICONS[name] || ICONS.sparkle;
@@ -214,6 +215,7 @@
       const cls = u.expired ? 'warn' : (u.enabled ? '' : 'off');
       return `<div class="sub-user" data-uid="${esc(u.uid)}">
         <div class="sub-user-head">
+          <span class="avatar user-avatar sub-medal sub-pic" data-sub-upic="${esc(u.uid)}" role="button" tabindex="0" data-tip="تصویر این کاربر" aria-label="تصویر این کاربر"><img src="${esc(u.avatar_url||'/static/img/titan-avatar.svg')}" alt=""></span>
           <span class="sub-user-name">${esc(u.name)}<span class="muted"> · ${esc((u.protocol||'').toUpperCase())}</span></span>
           <span class="pill ${cls}">${esc(state)}</span>
           <span class="spacer"></span>
@@ -230,6 +232,21 @@
         <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">نام اشتراک
           <input id="subName" value="${esc(editing&&editing.name||'')}" placeholder="مثلاً پک موبایل" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">
         </label>
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:12px;align-items:center">
+          <div class="avatar user-avatar sub-medal" id="subAvPreview" style="width:46px;height:46px;overflow:hidden">
+            <img src="${esc(avatarUrl(editing&&editing.avatar||''))}" alt="" style="width:100%;height:100%;object-fit:cover">
+          </div>
+          <div style="display:grid;gap:8px">
+            <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+              <input type="hidden" id="subAvatar" value="${esc(editing&&editing.avatar||'')}">
+              <button type="button" id="subAvPick" style="padding:8px 12px;border-radius:10px;border:1px solid rgba(151,116,255,.24);background:rgba(91,49,176,.12);color:#eee9ff;cursor:pointer">انتخاب تصویر این لینک</button>
+              <span style="font-size:10px;color:#8586a8">اگر خالی بماند، تصویر خودِ کاربر روی صفحهٔ اشتراک می‌آید</span>
+            </div>
+            <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">عنوان پلن (زیر نام کاربر روی همان صفحه)
+              <input id="subPlan" value="${esc(editing&&editing.plan||'')}" placeholder="Premium Subscription" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">
+            </label>
+          </div>
+        </div>
         <p style="margin:0;font-size:11px;color:#a8a6bf;line-height:2">
           از بین کانفیگ‌های ساخته‌شده انتخاب کن؛ هر چیزی که تیک بخورد داخل همین لینک می‌آید.
           یک کاربر می‌تواند چند کانفیگ داشته باشد و چند کاربر می‌توانند در یک لینک جمع شوند.
@@ -247,7 +264,9 @@
           if(on.length) items.push({uid:uid, configs:on});
         });
         if(!items.length) throw new Error('حداقل یک کانفیگ انتخاب کن');
-        const body = {name:name, items:items};
+        const body = {name:name, items:items,
+                      avatar:$('#subAvatar',overlay).value||'',
+                      plan:$('#subPlan',overlay).value.trim()};
         const res = editing ? await apiJson('/api/subscriptions/'+editing.id,{method:'PATCH',body:body})
                             : await apiJson('/api/subscriptions',{method:'POST',body:body});
         if(refresh) refresh();
@@ -277,6 +296,27 @@
         const uid=b.dataset.subNone;
         overlay.querySelectorAll(`.sub-chip[data-sub-uid="${uid}"]`).forEach(c=>c.classList.remove('on')); paint();
       }));
+      // each user's own picture — what the page falls back to when the link has none
+      overlay.querySelectorAll('[data-sub-upic]').forEach(el=> el.addEventListener('click', async()=>{
+        const uid=el.dataset.subUpic;
+        const rec=users.find(x=>x.uid===uid)||{};
+        try{
+          const k=await openGalleryPicker(rec.avatar||'');
+          if(k==null) return;
+          await apiJson('/api/users/'+uid,{method:'PATCH',body:{avatar:k}});
+          rec.avatar=k; rec.avatar_url=avatarUrl(k);
+          const img=el.querySelector('img'); if(img) img.src=avatarUrl(k);
+          toast('تصویر کاربر ذخیره شد');
+        }catch(e){ toast(e.message); }
+      }));
+      overlay.querySelectorAll('[data-sub-upic]').forEach(el=> el.addEventListener('keydown', (e)=>{
+        if(e.key==='Enter'||e.key===' '){ e.preventDefault(); el.click(); }
+      }));
+      const avPick=$('#subAvPick',overlay), avIn=$('#subAvatar',overlay), avImg=$('#subAvPreview img',overlay);
+      if(avPick) avPick.onclick=async()=>{
+        const k=await openGalleryPicker(avIn.value);
+        if(k!=null){ avIn.value=k; if(avImg) avImg.src=avatarUrl(k); }
+      };
       const copyBtn=overlay.querySelector('[data-sub-copyurl]');
       if(copyBtn) copyBtn.addEventListener('click', async()=>{
         try{ await navigator.clipboard.writeText(editing.url||''); toast('لینک کپی شد'); }catch(e){ toast(editing.url||''); }
@@ -1108,13 +1148,17 @@
             tbody.innerHTML=subs.length? subs.map(sb=>{
               const on=!!sb.enabled;
               const seen=sb.last_used? new Date(sb.last_used*1000).toLocaleString('fa-IR',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : 'هرگز';
-              return `<tr><td><span class="user-cell"><span class="avatar user-avatar sub-medal">${esc((sb.name||'S').slice(0,1).toUpperCase())}</span>${esc(sb.name)}</span><span class="sub-token muted" dir="ltr">…${esc((sb.token||'').slice(-6))}</span></td>`
+              // the picture the page shows: the link's own, else its user's, else TiTaN
+              const pic='/s/'+esc(sb.token)+'/avatar';
+              return `<tr><td><span class="user-cell"><span class="avatar user-avatar sub-medal" data-sub="${esc(sb.id)}" data-act="pic" role="button" tabindex="0" data-tip="تصویر این لینک روی صفحهٔ اشتراک" aria-label="تصویر این لینک"><img src="${pic}" alt=""></span>${esc(sb.name)}</span><span class="sub-token muted" dir="ltr">…${esc((sb.token||'').slice(-6))}</span></td>`
                 +`<td><span class="pill ${on?'':'off'}">${on?'فعال':'غیرفعال'}</span></td>`
                 +`<td><span class="sub-count">${sb.users||0}</span> کاربر</td>`
                 +`<td><span class="sub-count">${sb.configs||0}</span> کانفیگ</td>`
                 +`<td class="muted">${sb.hits||0} بار · ${esc(seen)}</td>`
                 +`<td><div class="row-actions">${icoBtn({"data-sub":sb.id,"data-act":"manage"},"sliders","ساخت/ویرایش کانفیگ‌های این لینک","gold")}`
-                +`${icoBtn({"data-sub":sb.id,"data-act":"copy"},"copy","کپی لینک اشتراک","violet")}`
+                +`${icoBtn({"data-sub":sb.id,"data-act":"copy"},"copy","کپی لینک اشتراک (برای کلاینت‌ها)","violet")}`
+                +`${icoBtn({"data-sub":sb.id,"data-act":"page"},"dashboard","کپی لینک صفحهٔ اشتراک (برای کاربر)","")}`
+                +`${icoBtn({"data-sub":sb.id,"data-act":"pic"},"image","تصویر این لینک روی صفحهٔ اشتراک","violet")}`
                 +`${icoBtn({"data-sub":sb.id,"data-act":"qr"},"qr","QR لینک اشتراک","")}`
                 +`${icoBtn({"data-sub":sb.id,"data-act":"power","data-on":on?1:0},"power",on?'غیرفعال کردن':'فعال کردن',on?'':'ok')}`
                 +`${icoBtn({"data-sub":sb.id,"data-act":"del"},"trash","حذف لینک","danger")}</div></td></tr>`
@@ -1128,6 +1172,24 @@
             }));
             tbody.querySelectorAll('[data-act="qr"]').forEach(b=> b.addEventListener('click', ()=>{
               window.open('/api/subscriptions/'+b.dataset.sub+'/qr','_blank');
+            }));
+            tbody.querySelectorAll('[data-act="page"]').forEach(b=> b.addEventListener('click', async()=>{
+              try{ const sb=await find(b.dataset.sub); await navigator.clipboard.writeText(sb.page_url||('location.origin'+'/p/'+sb.token)); toast('لینک صفحهٔ اشتراک کپی شد'); }
+              catch(e){ toast(e.message); }
+            }));
+            const pickSubPic=async(id)=>{
+              try{
+                const sb=await find(id);
+                const k=await openGalleryPicker((sb&&sb.avatar)||'');
+                if(k==null) return;
+                await apiJson('/api/subscriptions/'+id,{method:'PATCH',body:{avatar:k}});
+                toast(k?'تصویر این لینک ذخیره شد':'تصویر این لینک برداشته شد');
+                refreshSubs();
+              }catch(e){ toast(e.message); }
+            };
+            tbody.querySelectorAll('[data-act="pic"]').forEach(b=> b.addEventListener('click', ()=>pickSubPic(b.dataset.sub)));
+            tbody.querySelectorAll('[data-act="pic"]').forEach(b=> b.addEventListener('keydown', (e)=>{
+              if(e.key==='Enter'||e.key===' '){ e.preventDefault(); pickSubPic(b.dataset.sub); }
             }));
             tbody.querySelectorAll('[data-act="power"]').forEach(b=> b.addEventListener('click', async()=>{
               const on=b.dataset.on==='1'; b.disabled=true;

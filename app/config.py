@@ -106,6 +106,11 @@ XRAY_TCP_TROJAN_PORT = int(os.environ.get("XRAY_TCP_TROJAN_PORT", "10012"))     
 TLS_CERT_FILE = os.environ.get("TITAN_TLS_CERT", "")
 TLS_KEY_FILE = os.environ.get("TITAN_TLS_KEY", "")
 
+# Who to contact from the public subscription page and from the client
+# (clients show `support-url` in their own UI when it is present).
+SUPPORT_URL = os.environ.get("TITAN_SUPPORT_URL", "https://t.me/Code_Shield").strip()
+GITHUB_URL = os.environ.get("TITAN_GITHUB_URL", "https://github.com/mr-rashidi").strip()
+
 IS_RAILWAY = bool(os.environ.get("RAILWAY_SERVICE_ID") or os.environ.get("RAILWAY_PROJECT_ID"))
 
 # ---------------------------------------------------------------- edge exposure
