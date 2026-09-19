@@ -4,6 +4,7 @@ FastAPI app: admin UI + REST API + subscription endpoints. Xray-core does the
 actual proxying; nginx fronts both. SQLite for storage.
 """
 import asyncio
+import functools
 import logging
 import base64
 import gzip
@@ -466,6 +467,25 @@ def _sub_transport_choices(u: dict) -> list:
     return [stored] + rest
 
 
+def _entry_place(plan: dict) -> dict:
+    """{place, city, country_code, flag} for one link — node or this panel."""
+    node = plan.get("node") or {}
+    if plan.get("target") == "node" and node:
+        return {
+            "place": node.get("name") or "",
+            "city": node.get("city") or "",
+            "country_code": (node.get("country_code") or "").lower(),
+            "flag": node.get("flag") or "",
+        }
+    local = db.local_node() or {}
+    return {
+        "place": local.get("name") or "TiTaN",
+        "city": local.get("city") or "",
+        "country_code": (local.get("country_code") or "").lower(),
+        "flag": local.get("flag") or "",
+    }
+
+
 def _sub_variant(u: dict, transport: str) -> dict:
     """The same user row as it would look if this transport were its stored one."""
     row = dict(u)
@@ -527,6 +547,9 @@ def _sub_entries(u: dict, request: Request | None) -> list:
             "host": host,
             "port": port,
             "target": plan["target"],
+            # Where this config physically is: the node's own location, or this
+            # panel's. The subscription page shows it as the flag + city column.
+            **_entry_place(plan),
         })
     return entries
 
@@ -2614,6 +2637,9 @@ def _sub_catalog(request: Request, users: list | None = None) -> list:
             "enabled": bool(u.get("enabled")),
             "node_id": u.get("node_id"),
             "expired": bool(st.get("expired")),
+            # the picture, so the builder shows who is who (and can change it)
+            "avatar": u.get("avatar") or "",
+            "avatar_url": _resolve_avatar(u.get("avatar") or "")["url"],
             "configs": [{
                 "key": e["key"],
                 "label": e["label"],
@@ -2654,6 +2680,52 @@ def _sub_link_url(sub: dict, request: Request) -> str:
     return f"{scheme}://{host}/s/{sub['token']}"
 
 
+@functools.lru_cache(maxsize=1)
+def _subscription_page_html() -> str:
+    """The uploaded design, read once (4.5 MB of inlined assets)."""
+    with open(os.path.join(BASE_DIR, "templates", "subscription.html"), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _avatar_path(key: str) -> str:
+    """Filesystem path of an avatar key — the public page cannot use /api/..."""
+    key = _sanitize_avatar_key(key)
+    if not key:
+        return ""
+    kind, _, name = key.partition(":")
+    if kind == "gallery":
+        return os.path.join(BASE_DIR, "static", "img", "gallery", f"{name}.svg")
+    if kind == "upload":
+        return os.path.join(_gallery_upload_dir(), os.path.basename(name))
+    return ""
+
+
+def _looks_like_browser(request: Request) -> bool:
+    """True when a *person* opened the subscription link in a browser.
+
+    Clients importing a subscription send `Accept: */*` (never `text/html`) and
+    none of the `Sec-Fetch-*` headers, so the Accept check alone already splits
+    the two audiences; `Sec-Fetch-Mode/Dest` — sent by every current browser —
+    makes it exact where they are available. `?raw=1` forces the plain payload.
+    """
+    if (request.query_params.get("raw") or "").strip().lower() in ("1", "true", "raw"):
+        return False
+    if "text/html" not in (request.headers.get("accept") or ""):
+        return False
+    mode = (request.headers.get("sec-fetch-mode") or "").lower()
+    dest = (request.headers.get("sec-fetch-dest") or "").lower()
+    if mode or dest:
+        return mode == "navigate" or dest == "document"
+    return "mozilla" in (request.headers.get("user-agent") or "").lower()
+
+
+def _sub_page_url(sub: dict, request: Request) -> str:
+    """The human link: the page a user opens (the raw link stays /s/<token>)."""
+    host = _public_host(request)
+    scheme = "http" if host.startswith(("127.", "localhost")) else "https"
+    return f"{scheme}://{host}/p/{sub['token']}"
+
+
 def _serialize_subscription(sub: dict, request: Request, users: list | None = None) -> dict:
     users = users if users is not None else db.list_users()
     by_uid = {u["uid"]: u for u in users}
@@ -2673,6 +2745,10 @@ def _serialize_subscription(sub: dict, request: Request, users: list | None = No
         "configs": len(links),
         "missing": [i["uid"] for i in items if i["uid"] not in by_uid],
         "note": sub.get("note") or "",
+        "plan": sub.get("plan") or "",
+        "avatar": sub.get("avatar") or "",
+        "avatar_url": _resolve_avatar(sub.get("avatar") or "")["url"],
+        "page_url": _sub_page_url(sub, request),
         "hits": int(sub.get("hits") or 0),
         "last_used": sub.get("last_used") or 0,
         "created_at": sub.get("created_at") or 0,
@@ -2742,12 +2818,13 @@ async def _dispatch_subscription(token: str, request: Request, fmt: str):
     db.touch_subscription(sub["id"])
     body, users = _sub_body(sub, request)
     headers = _sub_headers_multi(sub.get("name") or "TiTaN", users)
+    headers["Profile-Web-Page-Url"] = _sub_page_url(sub, request)
+    headers["profile-web-page-url"] = headers["Profile-Web-Page-Url"]
     if fmt == "json":
-        return JSONResponse({
-            "name": sub.get("name"),
-            "users": [{"uid": u["uid"], "name": u["name"]} for u in users],
-            "links": _sub_included(sub, {u["uid"]: u for u in users}, request),
-        }, headers=headers)
+        payload = _sub_page_data(sub, request, users)
+        payload["users"] = [{"uid": u["uid"], "name": u["name"]} for u in users]
+        payload["links"] = _sub_included(sub, {u["uid"]: u for u in users}, request)
+        return JSONResponse(payload, headers=headers)
     # Same shape as the personal link (/sub/{uid}): the plain path answers with
     # the base64 payload every client already parses, /json is for debugging.
     return Response(content=body, media_type="text/plain", headers=headers)
@@ -2779,7 +2856,9 @@ async def api_create_subscription(request: Request, _: str = Depends(_require_au
     token = secrets.token_urlsafe(18)
     sub = db.create_subscription(name, token, items,
                                  note=(payload.get("note") or "")[:200],
-                                 enabled=payload.get("enabled", True) is not False)
+                                 enabled=payload.get("enabled", True) is not False,
+                                 avatar=_sanitize_avatar_key(payload.get("avatar") or ""),
+                                 plan=(payload.get("plan") or "").strip()[:48])
     db.add_event("info", "sub-create", f"{name} ({len(items)} users)", ip=_client_ip(request))
     return {"ok": True, "subscription": _serialize_subscription(sub, request, list(users_by_uid.values()))}
 
@@ -2795,6 +2874,10 @@ async def api_update_subscription(sub_id: int, request: Request, _: str = Depend
         fields["name"] = (payload.get("name") or "").strip()[:64] or sub["name"]
     if "note" in payload:
         fields["note"] = (payload.get("note") or "")[:200]
+    if "plan" in payload:
+        fields["plan"] = (payload.get("plan") or "").strip()[:48]
+    if "avatar" in payload:
+        fields["avatar"] = _sanitize_avatar_key(payload.get("avatar") or "")
     if "enabled" in payload:
         fields["enabled"] = bool(payload["enabled"])
     if "items" in payload:
@@ -2827,12 +2910,169 @@ async def api_subscription_qr(sub_id: int, request: Request, _: str = Depends(_r
 
 @app.get("/s/{token}")
 async def sub_link(token: str, request: Request):
+    """One address, two faces: raw configs for a client, the page for a person."""
+    if _looks_like_browser(request):
+        return await sub_page(token, request)
     return await _dispatch_subscription(token, request, "plain")
 
 
 @app.get("/s/{token}/base64")
 async def sub_link_base64(token: str, request: Request):
     return await _dispatch_subscription(token, request, "base64")
+
+
+def _sub_page_data(sub: dict, request: Request, users: list, include_links: bool = True) -> dict:
+    """Everything the public page shows, for one subscription link.
+
+    One call, one shape: the profile the admin set for this link (its own picture
+    and label, falling back to the user's), the usage/expiry carried by the users
+    inside it, and the exact configs it serves — each with the place it lands in
+    and the link a client would connect with.
+    """
+    items = _sub_items(sub.get("items"))
+    by_uid = {u["uid"]: u for u in users}
+    ordered = [by_uid[i["uid"]] for i in items if i["uid"] in by_uid]
+    links = _sub_included(sub, by_uid, request)
+    per_user = {u["uid"]: _sub_entries(u, request) for u in ordered}
+
+    configs = []
+    for item in items:
+        user = by_uid.get(item["uid"])
+        if not user or not user.get("enabled"):
+            continue
+        entries = per_user.get(item["uid"]) or []
+        chosen = [e for e in entries if e["key"] in set(item["configs"])] if item["configs"] else entries
+        for e in chosen:
+            if e["link"] not in links:
+                continue
+            configs.append(e)
+    counter: dict = {}
+    shown = []
+    for e in configs:
+        cc = (e.get("country_code") or "").lower()
+        counter[cc] = counter.get(cc, 0) + 1
+        shown.append({
+            "country_code": cc or "un",
+            "flag": e.get("flag") or "",
+            "city": e.get("city") or "",
+            "place": e.get("place") or "",
+            "name": f"TiTaN-{(cc or 'UN').upper()}-{counter[cc]:02d}",
+            "protocol": e.get("protocol") or "",
+            "transport": e.get("transport") or "",
+            "security": e.get("security") or "",
+            "target": e.get("target") or "panel",
+            "label": e.get("label") or "",
+            "link": e["link"],
+        })
+
+    # Usage of the whole link: the users it carries, summed. The expiry is the
+    # soonest one — the moment the link stops working for the client.
+    used = sum(int(u.get("used_up") or 0) + int(u.get("used_down") or 0) for u in ordered)
+    total = sum(int(u.get("quota_bytes") or 0) for u in ordered)
+    expiries = [int(u.get("expire_at") or 0) for u in ordered if u.get("expire_at")]
+    expire_at = min(expiries) if expiries else 0
+    now = time.time()
+    days_left = max(0, int((expire_at - now) // 86400)) if expire_at else None
+    live = [u for u in ordered if _user_status(u)["live_enabled"]]
+    remaining = max(0, total - used) if total > 0 else 0
+
+    avatar_key = (sub.get("avatar") or "").strip()
+    if not avatar_key and len(ordered) == 1:
+        avatar_key = (ordered[0].get("avatar") or "").strip()
+    profile_name = (sub.get("name") or "").strip()
+    if not profile_name or profile_name.lower() == "subscription":
+        profile_name = (ordered[0].get("name") if ordered else "") or "TiTaN"
+
+    if not include_links:
+        # A switched-off link: the profile and the numbers are still the truth
+        # about it, the configs and the subscription URL are not handed over.
+        shown = []
+    return {
+        "name": sub.get("name"),
+        "plan": sub.get("plan") or "",
+        "profile": {
+            "name": profile_name,
+            "avatar": f"/s/{sub['token']}/avatar" if avatar_key else "",
+            "key": avatar_key,
+            "kind": "subscription" if (sub.get("avatar") or "").strip() else "user",
+        },
+        "subscription": {
+            "name": sub.get("name") or "",
+            "enabled": bool(sub.get("enabled")),
+            "token": sub["token"],
+            "url": _sub_link_url(sub, request) if include_links else "",
+            "page_url": _sub_page_url(sub, request),
+            "serves_links": include_links,
+            "created_at": sub.get("created_at") or 0,
+            "hits": int(sub.get("hits") or 0),
+        },
+        "usage": {
+            "used_bytes": used,
+            "used_up": sum(int(u.get("used_up") or 0) for u in ordered),
+            "used_down": sum(int(u.get("used_down") or 0) for u in ordered),
+            "total_bytes": total,
+            "remaining_bytes": remaining,
+            "used_pct": round((used / total) * 100, 2) if total > 0 else 0,
+            "remaining_pct": round((remaining / total) * 100, 2) if total > 0 else 0,
+            "expire_at": expire_at,
+            "days_left": days_left,
+            "active": bool(live),
+            "users": len(ordered),
+            "live_users": len(live),
+        },
+        "configs": shown,
+        "users": [{"uid": u["uid"], "name": u["name"], "enabled": bool(u.get("enabled"))}
+                  for u in ordered],
+        "counts": {"configs": len(shown), "users": len(ordered)},
+        "support": {"github": config.GITHUB_URL, "telegram": config.SUPPORT_URL},
+    }
+
+
+@app.get("/p/{token}")
+@app.get("/p/{token}/")
+async def sub_page(token: str, request: Request):
+    """The subscription *page* — what the admin sends a user to open."""
+    sub = db.get_subscription_by_token(token)
+    if not sub:
+        raise HTTPException(404, "not-found")
+    return HTMLResponse(
+        _subscription_page_html(),
+        headers={"Cache-Control": "no-store, must-revalidate", "X-Powered-By": "TiTaN"},
+    )
+
+
+@app.get("/p/{token}/data")
+async def sub_page_data(token: str, request: Request):
+    """What the page shows for this link — works before it is switched on, too."""
+    sub = db.get_subscription_by_token(token)
+    if not sub:
+        raise HTTPException(404, "not-found")
+    items = _sub_items(sub.get("items"))
+    wanted = {i["uid"] for i in items}
+    users = [u for u in db.list_users() if u["uid"] in wanted]
+    if sub.get("enabled"):
+        db.touch_subscription(sub["id"])
+    return JSONResponse(
+        _sub_page_data(sub, request, users, include_links=bool(sub.get("enabled"))),
+        headers={"Cache-Control": "no-store, must-revalidate", "X-Powered-By": "TiTaN"},
+    )
+
+
+@app.get("/s/{token}/avatar")
+async def sub_avatar(token: str, request: Request):
+    """The profile picture of a link, on a path a client-less browser can load."""
+    sub = db.get_subscription_by_token(token)
+    if not sub:
+        raise HTTPException(404, "not-found")
+    key = (sub.get("avatar") or "").strip()
+    if not key:
+        users = [u for u in db.list_users() if u.get("uid") in {i["uid"] for i in _sub_items(sub.get("items"))}]
+        if len(users) == 1:
+            key = (users[0].get("avatar") or "").strip()
+    path = _avatar_path(key)
+    if not path or not os.path.exists(path):
+        path = os.path.join(BASE_DIR, "static", "img", "titan-avatar.svg")
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=300"})
 
 
 @app.get("/s/{token}/json")
