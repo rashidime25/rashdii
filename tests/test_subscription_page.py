@@ -452,3 +452,28 @@ def test_the_page_declares_itself_dark_so_no_browser_filter_is_added(panel):
     # and the canvas colour is the design's own navy, so the band a phone shows
     # while the page is still loading cannot flash white either
     assert '<meta name="theme-color" content="#03040d">' in html
+
+
+def test_the_admin_s_own_background_is_the_top_layer(panel):
+    """A file in the repo is the page's background; the design stays as a fallback.
+
+    The admin replaces the picture by uploading `static/img/backm.png` — no code
+    change. The design's own artwork is kept underneath it on purpose: a file that
+    is missing, half-uploaded or unreadable makes the browser drop that layer and
+    paint the one below, so the page can never go blank while he swaps pictures.
+    """
+    import re
+
+    uid, _ = _user(panel, "bgorder")
+    sub = _link(panel, [uid])
+    html = panel.get(f"/p/{sub['token']}").text
+    block = html[html.index("body::before"): html.index("}", html.index("body::before"))]
+    urls = re.findall(r'url\("([^"]+)"\)', block)
+    assert urls, block
+    assert urls[0] == "/static/img/backm.png", urls[0]
+    assert urls[1].startswith("data:image/jpeg;base64,/9j/"), "the fallback layer went missing"
+    # both layers sized and placed the same way, so a swap changes nothing else
+    assert block.count("center top / cover no-repeat") == 2
+    # and the file the page points at is part of the repo that serves it
+    assert pathlib.Path(__file__).resolve().parent.parent.joinpath(
+        "static", "img", "backm.png").exists(), "the background file is missing from the repo"
