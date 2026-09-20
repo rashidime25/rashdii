@@ -628,6 +628,55 @@ def _require_auth(request: Request) -> str:
     return user
 
 
+def _quota_bytes_from_payload(payload: dict) -> int | None:
+    """Volume from a request, in whichever unit the panel was asked for.
+
+    `quota_gb` is what the dashboard has always sent; `quota_mb` (a small test
+    config, a 500 MB top-up) and the explicit pair `quota` + `quota_unit=mb|gb`
+    are accepted too. Returns None when the request said nothing about volume.
+    """
+    unit = str(payload.get("quota_unit") or "").strip().lower()
+    if "quota_mb" in payload and payload.get("quota_mb") is not None:
+        raw, factor = payload.get("quota_mb"), 1024 ** 2
+    elif "quota_gb" in payload and payload.get("quota_gb") is not None:
+        raw, factor = payload.get("quota_gb"), 1024 ** 3
+    elif "quota" in payload and payload.get("quota") is not None:
+        raw = payload.get("quota")
+        factor = 1024 ** 2 if unit in ("mb", "m", "mib") else 1024 ** 3
+    else:
+        return None
+    qstr = str(raw).strip()
+    if qstr in ("", "0", "0.0"):
+        return 0
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError
+    out = round(value * factor)
+    if out < 0 or out > (1 << 63) - 1:
+        raise ValueError
+    return out
+
+
+def _renewal_reopens_user(before: dict, after: dict) -> bool:
+    """True when an update just renewed a user who was cut off for volume.
+
+    "Until it is renewed, no traffic" — and the other half of that sentence is
+    that renewing (raising the volume or resetting the usage) brings the config
+    straight back instead of leaving the admin to flip the switch by hand.
+    """
+    used = int(after.get("used_up") or 0) + int(after.get("used_down") or 0)
+    quota = int(after.get("quota_bytes") or 0)
+    if not quota or used >= quota:
+        return False           # still over (or unlimited-but-empty) — stay off
+    was_over = int(before.get("quota_bytes") or 0) > 0 and (
+        int(before.get("used_up") or 0) + int(before.get("used_down") or 0)
+    ) >= int(before.get("quota_bytes") or 0)
+    raised = quota > int(before.get("quota_bytes") or 0)
+    if after.get("expire_at") and time.time() >= after["expire_at"]:
+        return False           # the clock ran out too: renewal means both
+    return bool(was_over or raised)
+
+
 def _user_status(u: dict) -> dict:
     now = time.time()
     used = (u.get("used_up") or 0) + (u.get("used_down") or 0)
@@ -658,6 +707,7 @@ def _serialize_user(u: dict, with_links: bool = False, request: Request | None =
     out["status"] = _user_status(u)
     out["used_gb"] = round(out["status"]["used"] / (1024 ** 3), 3)
     out["quota_gb"] = round((u.get("quota_bytes") or 0) / (1024 ** 3), 3)
+    out["quota_mb"] = round((u.get("quota_bytes") or 0) / (1024 ** 2), 1)
     out["avatar_url"] = _resolve_avatar(u.get("avatar") or "")["url"]
     out["sub_transports"] = _sub_selection(u)
     _, edge_warnings = _edge_link_view(u)
@@ -1361,17 +1411,10 @@ async def api_create_user(request: Request, _: str = Depends(_require_auth)):
     try:
         max_devices = int(payload.get("max_devices") or 0)
         max_requests = int(payload.get("max_requests") or 0)
-        quota_gb_raw = payload.get("quota_gb") or 0
-        qstr = str(quota_gb_raw).strip()
-        if qstr in ("", "0", "0.0"):
+        # GB or MB, whichever the dashboard asked for
+        quota_bytes = _quota_bytes_from_payload(payload)
+        if quota_bytes is None:
             quota_bytes = 0
-        else:
-            fv = float(quota_gb_raw)
-            if not math.isfinite(fv):
-                raise ValueError
-            quota_bytes = int(fv * 1024 ** 3)
-        if quota_bytes < 0 or quota_bytes > (1 << 63) - 1:
-            raise ValueError
     except (ValueError, TypeError, OverflowError):
         raise HTTPException(400, "invalid-quota") from None
     try:
@@ -1501,20 +1544,12 @@ async def api_update_user(uid: str, request: Request, _: str = Depends(_require_
         fields["fingerprint"] = "chrome"
     if "alpn" in fields and fields["alpn"] not in config.VALID_ALPNS:
         fields["alpn"] = "http/1.1"
-    if "quota_gb" in payload:
+    if any(k in payload for k in ("quota_gb", "quota_mb", "quota")):
         try:
-            q = payload.get("quota_gb") or 0
-            qstr = str(q).strip()
-            if qstr in ("", "0", "0.0"):
-                qb = 0
-            else:
-                fv = float(q)
-                if not math.isfinite(fv):
-                    raise ValueError
-                qb = int(fv * 1024 ** 3)
-            if qb < 0 or qb > (1 << 63) - 1:
+            quota_bytes = _quota_bytes_from_payload(payload)
+            if quota_bytes is None:
                 raise ValueError
-            fields["quota_bytes"] = qb
+            fields["quota_bytes"] = quota_bytes
         except (ValueError, TypeError, OverflowError):
             raise HTTPException(400, "invalid-quota") from None
     if "expire_days" in payload:
@@ -1525,6 +1560,10 @@ async def api_update_user(uid: str, request: Request, _: str = Depends(_require_
     updated = db.update_user(uid, fields)
     if updated and updated.get("protocol") == "wireguard":
         updated = wg.ensure_user_keys(updated)
+    # renewing the volume (or resetting the usage) brings the config back
+    if updated and not updated.get("enabled") and _renewal_reopens_user(user, updated):
+        updated = db.update_user(uid, {"enabled": True}) or updated
+        db.add_event("info", "renewed", f"quota renewed, config re-enabled: {uid}", user_id=user.get("id"))
     _reload_xray()
     node_sync = await _sync_node_now((updated or {}).get("node_id"))
     _trigger_node_sync()
@@ -1604,10 +1643,19 @@ async def api_delete_user(uid: str, request: Request, _: str = Depends(_require_
 
 @app.post("/api/users/{uid}/reset")
 async def api_reset_user(uid: str, _: str = Depends(_require_auth)):
-    if not db.get_user(uid):
+    user = db.get_user(uid)
+    if not user:
         raise HTTPException(404, "not-found")
     db.reset_user_usage(uid)
-    return {"ok": True}
+    # a reset is a renewal too: the volume is free again, so the config goes back
+    fresh = db.get_user(uid)
+    reopened = False
+    if fresh and not fresh.get("enabled") and _renewal_reopens_user(user, fresh):
+        db.update_user(uid, {"enabled": True})
+        reopened = True
+    _reload_xray()
+    _trigger_node_sync()
+    return {"ok": True, "reopened": reopened}
 
 
 @app.post("/api/users/{uid}/regenerate")

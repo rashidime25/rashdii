@@ -116,6 +116,19 @@ def test_container_command_targets_a_real_module():
     assert "EXPOSE" in dockerfile
 
 
+def _endpoint_source(tree, source: str, path: str) -> str:
+    """The body of the handler decorated with @app.<verb>("<path>")."""
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if isinstance(dec, ast.Call) and dec.args:
+                arg = dec.args[0]
+                if isinstance(arg, ast.Constant) and arg.value == path:
+                    return ast.get_source_segment(source, node) or ""
+    return ""
+
+
 def test_the_lines_a_bulk_replace_broke_are_intact():
     """Guards the neighbourhood of the incident against another sweep.
 
@@ -131,9 +144,16 @@ def test_the_lines_a_bulk_replace_broke_are_intact():
     # Railway domain fallback landed, so match the behaviour, not the wording)
     assert re.search(r"host\.split\(\":\"\)", main), "the public-host helper lost its port split"
     for needle in ("def _public_host(request: Request) -> str:",
-                   "return port if 1 <= port <= 65535 else 443",
-                   "if not db.get_user(uid):"):
+                   "return port if 1 <= port <= 65535 else 443"):
         assert needle in main, f"main.py lost: {needle!r}"
+    # the destructive handlers still refuse a user that is not there. The shape
+    # of that check changed when /reset learned to re-open a cut-off config, so
+    # this matches the guard itself, not the exact line it used to sit on.
+    for path in ("/api/users/{uid}/reset", "/api/users/{uid}/regenerate"):
+        body = _endpoint_source(tree, main, path)
+        assert body, f"no handler found for {path}"
+        assert "db.get_user(uid)" in body and "not-found" in body, \
+            f"{path} no longer refuses an unknown user"
 
 
 def test_no_typographic_operators_in_executable_code():

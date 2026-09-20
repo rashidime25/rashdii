@@ -361,6 +361,14 @@
   }
 
   // --- gallery picker (real, as in old panel) ---
+  // volume: what the admin typed, in whichever unit reads best (500 MB, 2 GB)
+  function quotaView(u){
+    const gb=Number((u&&u.quota_gb)||0);
+    const mb=Number((u&&u.quota_mb)||0);
+    if(gb>0&&gb<1) return {value:String(Number(mb.toFixed(mb<10?1:0))), unit:'mb'};
+    return {value:String(gb||0), unit:'gb'};
+  }
+
   function avatarUrl(key){
     key=key||''; if(key.startsWith('gallery:')) return '/static/img/gallery/'+key.slice(8)+'.svg'; if(key.startsWith('upload:')) return '/api/gallery-image/'+key.slice(7); return '/static/img/titan-avatar.svg';
   }
@@ -634,7 +642,15 @@
           <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">ALPN<select id="mu_alpn" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">${alpns.map(a=>`<option value="${a}" ${(u.alpn??settings.default_alpn??'http/1.1')===a?'selected':''}>${a||'—'}</option>`).join('')}</select></label>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-          <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">حجم (GB)<input id="mu_quota" type="number" step="0.1" value="${u.quota_gb||0}" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"></label>
+          <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">حجم
+            <span style="display:flex;gap:8px">
+              <input id="mu_quota" type="number" step="0.1" min="0" value="${quotaView(u).value}" style="flex:1;background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">
+              <select id="mu_quota_unit" style="width:78px;background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px">
+                <option value="gb" ${quotaView(u).unit==='gb'?'selected':''}>GB</option>
+                <option value="mb" ${quotaView(u).unit==='mb'?'selected':''}>MB</option>
+              </select>
+            </span>
+          </label>
           <label style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:#a8a6bf">انقضا (روز)<input id="mu_expire" type="number" value="${expireDays}" style="background:rgba(10,20,39,.8);border:1px solid rgba(108,125,165,.18);border-radius:10px;color:#e9e6f6;padding:11px"></label>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
@@ -654,7 +670,8 @@
         fingerprint: $('#mu_fp',overlay).value,
         alpn: $('#mu_alpn',overlay).value,
         ss_method: $('#mu_ss',overlay) ? $('#mu_ss',overlay).value : undefined,
-        quota_gb: parseFloat($('#mu_quota',overlay).value)||0,
+        quota_gb: $('#mu_quota_unit',overlay).value==='gb' ? (parseFloat($('#mu_quota',overlay).value)||0) : 0,
+        quota_mb: $('#mu_quota_unit',overlay).value==='mb' ? (parseFloat($('#mu_quota',overlay).value)||0) : 0,
         expire_days: parseInt($('#mu_expire',overlay).value)||0,
         max_devices: parseInt($('#mu_devices',overlay).value)||0,
         max_requests: parseInt($('#mu_requests',overlay).value)||0,
