@@ -282,12 +282,140 @@ def test_the_page_never_paints_a_light_layer_over_the_uploaded_background(panel)
     uid, _ = _user(panel, "bg")
     sub = _link(panel, [uid])
     html = panel.get(f"/p/{sub['token']}").text
-    body_rule = html[html.index("body{"):html.index("body{") + 400]
-    assert "linear-gradient(180deg,rgba(2,3,12,.08)" in body_rule, "the design's own veil, untouched"
+    # the design's own darkening gradient is gone: it read as a grey veil over
+    # the whole page, and repeated past the body box as a seam under the content
+    assert "linear-gradient(180deg,rgba(2,3,12,.08)" not in html
+    assert "rgba(2,3,12,.42)" not in html
+    # the artwork is painted on its own fixed backdrop, at the design's position
+    assert "body::before{" in html
+    assert "position:fixed;inset:0;z-index:-1" in html
+    assert "center top / cover no-repeat" in html
     # the artwork is declared as what it is: a JPEG (it was labelled image/png,
     # which strict browsers refuse — the art vanished and only the veil stayed)
     assert 'url("data:image/jpeg;base64,/9j/' in html
     assert 'url("data:image/png;base64,/9j/' not in html
     # and the page's base colour is the design's own --bg, never a white wash
-    assert "getPropertyValue('--bg')" in html and "document.body.style.backgroundColor" in html
+    assert "getPropertyValue('--bg')" in html
     assert "background:#fff" not in html.lower().replace(" ", "")
+
+def test_a_volume_may_be_set_in_megabytes(panel):
+    """A config can be metered in MB — and the renewal reopens it."""
+    # create with megabytes
+    r = panel.post("/api/users", json={"name": "mbuser", "protocol": "vless", "transport": "ws",
+                                       "security": "tls", "quota_mb": 500}, headers=ORIGIN)
+    assert r.status_code == 200, r.text
+    user = r.json()["user"]
+    assert user["quota_gb"] == round(500 / 1024, 3)
+    assert user["quota_mb"] == 500.0
+    uid = user["uid"]
+
+    # ... and change it from GB to MB again
+    upd = panel.patch(f"/api/users/{uid}", json={"quota_mb": 1500}, headers=ORIGIN).json()["user"]
+    assert upd["quota_mb"] == 1500.0
+    assert int(db.get_user(uid)["quota_bytes"]) == 1500 * 1024 ** 2
+
+    # the explicit pair works too
+    panel.patch(f"/api/users/{uid}", json={"quota": 2, "quota_unit": "mb"}, headers=ORIGIN)
+    assert db.get_user(uid)["quota_bytes"] == 2 * 1024 ** 2
+    panel.patch(f"/api/users/{uid}", json={"quota": 3, "quota_unit": "gb"}, headers=ORIGIN)
+    assert db.get_user(uid)["quota_bytes"] == 3 * 1024 ** 3
+
+    # bad input is a 400, never a 500
+    assert panel.patch(f"/api/users/{uid}", json={"quota_mb": "abc"}, headers=ORIGIN).status_code == 400
+
+
+def test_a_spent_volume_really_cuts_the_config_off(panel):
+    """Quota reached → disabled + Xray reloaded; renewing brings it back."""
+    from app import main as app_main
+    from app import tasks
+
+    uid, _ = _user(panel, "cutoff", quota_mb=1)
+    quota = int(db.get_user(uid)["quota_bytes"])
+    db.set_user_usage(uid, quota, 0)          # the whole volume is spent
+    reloads = []
+    app_main._reload_xray = lambda *a, **k: reloads.append(1)   # spy (patched below too)
+
+    assert tasks._check_quota(uid) is True, "the user was cut off"
+    assert not db.get_user(uid)["enabled"], "and the row is disabled"
+
+    # the helper writes the config and restarts Xray — that is what makes the
+    # client actually stop, instead of keeping a live credential
+    calls = []
+    tasks.xray.write_xray_config = lambda *a, **k: calls.append("write")
+    tasks.xray.restart_xray = lambda *a, **k: calls.append("restart")
+
+    import asyncio
+    asyncio.run(tasks._apply_cutoffs([uid]))
+    assert calls == ["write", "restart"], calls
+
+    # a second call is a no-op: no endless restart loop
+    assert tasks._check_quota(uid) is False
+
+    # renewing the volume reopens it ...
+    upd = panel.patch(f"/api/users/{uid}", json={"quota_mb": 500}, headers=ORIGIN).json()["user"]
+    assert bool(upd["enabled"]) is True, "raising the volume brought the config back"
+
+    # ... and so does resetting the usage
+    quota = int(db.get_user(uid)["quota_bytes"])
+    db.set_user_usage(uid, quota, 0)
+    tasks._check_quota(uid)
+    assert not db.get_user(uid)["enabled"]
+    r = panel.post(f"/api/users/{uid}/reset", headers=ORIGIN).json()
+    assert r["reopened"] is True and bool(db.get_user(uid)["enabled"])
+
+
+def test_nothing_opaque_can_end_up_in_front_of_the_artwork(panel):
+    """The art lives on `body::before` with z-index:-1 — behind every background.
+
+    So neither the body's own rule nor the page's script may paint an opaque
+    colour on the body: a background there is drawn *over* a negative-z-index
+    layer, which is how the artwork once vanished behind a flat navy page while
+    every HTML-level check still looked right.
+    """
+    uid, _ = _user(panel, "layer")
+    sub = _link(panel, [uid])
+    html = panel.get(f"/p/{sub['token']}").text
+    import re
+    body_rules = re.findall(r"body\{([^}]*)\}", html)
+    assert body_rules, "the page has no body rule at all"
+    assert any("background:transparent" in r for r in body_rules)
+    for rule in body_rules:
+        assert not re.search(r"background(-color)?:\s*(?!transparent)[^;}]+;?", rule), rule
+    # the navy lives on the root element, where it is only ever the canvas colour
+    assert re.search(r"html\{[^}]*background:var\(--bg\)", html)
+    assert "document.body.style.backgroundColor" not in html, \
+        "the script must not give the body an opaque background"
+    # the base colour is the canvas colour, on the root element
+    assert "document.documentElement.style.backgroundColor" in html
+
+
+def test_the_page_script_would_actually_run(panel):
+    """A parse error in the inline script silently kills every fix on the page.
+
+    That already happened once: a comment holding a line break between `async`
+    and `function` makes the parser read a bare `async` identifier, the script
+    dies with "async is not defined" before boot() ever runs — and the page just
+    keeps showing the design's sample numbers. `node --check` catches it.
+    """
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+
+    uid, _ = _user(panel, "parse")
+    sub = _link(panel, [uid])
+    html = panel.get(f"/p/{sub['token']}").text
+    blocks = [m.group(2) for m in re.finditer(r"<script(?![^>]*\bsrc=)([^>]*)>(.*?)</script>", html, re.S)
+              if "application/json" not in m.group(1) and m.group(2).strip()]
+    assert blocks, "the page has no inline script at all"
+    assert "boot();" in "".join(blocks), "nothing boots the page"
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed here")
+    for body in blocks:
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+            fh.write(body)
+            path = fh.name
+        proc = subprocess.run([node, "--check", path], capture_output=True, text=True)
+        pathlib.Path(path).unlink()
+        assert proc.returncode == 0, proc.stderr[:500]

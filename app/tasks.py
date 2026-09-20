@@ -28,6 +28,7 @@ async def _periodic_flush():
             deltas = await xray.get_xray_stats()
             if deltas:
                 total_up = total_down = 0
+                cut_off = []
                 for uid, d in deltas.items():
                     up, down = d.get("up", 0), d.get("down", 0)
                     db.add_user_usage(uid, up, down)
@@ -41,8 +42,10 @@ async def _periodic_flush():
                         p = _pending_usage.setdefault(uid, {"up": 0, "down": 0})
                         p["up"] += up
                         p["down"] += down
-                    else:
-                        _check_quota(uid)
+                    elif _check_quota(uid):
+                        cut_off.append(uid)
+                if cut_off:
+                    await _apply_cutoffs(cut_off)
                 db.add_traffic(int(time.time() // 3600) * 3600, total_up, total_down)
         except asyncio.CancelledError:
             break
@@ -50,16 +53,43 @@ async def _periodic_flush():
             await asyncio.sleep(2)
 
 
-def _check_quota(uid: str):
-    """Disable a user once their quota is exceeded."""
+def _check_quota(uid: str) -> bool:
+    """Cut a user off once their volume is spent. True when this call did it.
+
+    Marking the row disabled is not enough: Xray keeps serving the credentials
+    until the config is rewritten and the process restarted, which is why an
+    emptied config used to keep working (and keep burning traffic) until someone
+    happened to reload. The caller reloads once per burst.
+    """
     user = db.get_user(uid)
     if not user:
-        return
+        return False
     quota = user["quota_bytes"] or 0
     used = (user["used_up"] or 0) + (user["used_down"] or 0)
-    if quota > 0 and used >= quota:
+    if quota > 0 and used >= quota and user["enabled"]:
         db.update_user(uid, {"enabled": False})
         db.add_event("warn", "auto-disable", f"quota reached: {uid}", user_id=user["id"])
+        return True
+    return False
+
+
+async def _apply_cutoffs(uids: list) -> None:
+    """Apply the cut-offs to Xray now, and tell the nodes to do the same."""
+    if not uids:
+        return
+    log.warning("volume spent — cutting %d config(s) off now: %s",
+                len(uids), ", ".join(uids[:6]))
+    try:
+        await asyncio.to_thread(xray.write_xray_config)
+        await asyncio.to_thread(xray.restart_xray)
+    except Exception:  # noqa: BLE001
+        log.exception("could not apply the cut-off to xray")
+    if not config.IS_NODE:
+        try:
+            from . import nodes as nodesync
+            await nodesync.sync_all()
+        except Exception:  # noqa: BLE001
+            log.exception("could not push the cut-off to the nodes")
 
 
 async def _housekeeping():
@@ -68,10 +98,14 @@ async def _housekeeping():
         try:
             await asyncio.sleep(30)
             now = time.time()
+            expired_now = []
             for u in db.list_users():
                 if u["enabled"] and u.get("expire_at") and now >= u["expire_at"]:
                     db.update_user(u["uid"], {"enabled": False})
                     db.add_event("warn", "auto-disable", f"expired: {u['uid']}", user_id=u["id"])
+                    expired_now.append(u["uid"])
+            if expired_now:
+                await _apply_cutoffs(expired_now)
             # keep the local node's "last seen" fresh
             for n in db.list_nodes():
                 if n.get("is_local"):
