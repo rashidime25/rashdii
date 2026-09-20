@@ -24,6 +24,18 @@ SERVED_TRANSPORTS = {
 }
 
 
+def volume_text(used_bytes: int, quota_bytes: int) -> str:
+    """Used/quota the way the info line shows it.
+
+    A GB-only rendering turns a perfectly ordinary 250 MB plan into "0.00/0.24GB",
+    which reads like nothing at all. Under a gigabyte the pair is written in MB.
+    """
+    quota = quota_bytes or 0
+    if 0 < quota < 1024 ** 3:
+        return f"{used_bytes / 1024 ** 2:.2f}/{quota / 1024 ** 2:.0f}MB"
+    return f"{used_bytes / 1024 ** 3:.2f}/{quota / 1024 ** 3:g}GB"
+
+
 def _transport_for(user: dict, settings: dict) -> str:
     """Resolve the transport a user's link should advertise.
 
@@ -246,12 +258,11 @@ def build_links(host: str, port: int, user: dict, settings: dict,
     all_links = list(out.values())
 
     # Info "dummy" links so the client's remark shows live usage/expiry info.
-    quota_gb = (user.get("quota_bytes") or 0) / (1024 ** 3)
-    used_gb = ((user.get("used_up") or 0) + (user.get("used_down") or 0)) / (1024 ** 3)
+    used_bytes = (user.get("used_up") or 0) + (user.get("used_down") or 0)
     days_left = ""
     if user.get("expire_at"):
         days_left = f"{max(0, int((user['expire_at'] - time.time()) // 86400))}d"
-    remark = f"TiTaN {user['name']} | {used_gb:.2f}/{quota_gb:g}GB | {days_left or '∞'}"
+    remark = f"TiTaN {user['name']} | {volume_text(used_bytes, user.get('quota_bytes') or 0)} | {days_left or '∞'}"
     dummy = (
         f"vless://00000000-0000-0000-0000-000000000001@127.0.0.1:10001?"
         f"encryption=none&security=none&type=tcp&headerType=none#{quote(remark)}"

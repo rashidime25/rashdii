@@ -419,3 +419,18 @@ def test_the_page_script_would_actually_run(panel):
         proc = subprocess.run([node, "--check", path], capture_output=True, text=True)
         pathlib.Path(path).unlink()
         assert proc.returncode == 0, proc.stderr[:500]
+
+
+def test_a_small_volume_is_written_in_megabytes_everywhere_the_client_looks():
+    """A 250 MB plan must not be described to the client as "0.24GB".
+
+    The info line is the first thing a user sees in the client's config list, so
+    it has to speak the same unit the plan was sold in.
+    """
+    from app.links import volume_text
+
+    assert volume_text(0, 250 * 1024 ** 2) == "0.00/250MB"
+    assert volume_text(1024 ** 2, 512 * 1024 ** 2) == "1.00/512MB"
+    assert volume_text(0, 10 * 1024 ** 3) == "0.00/10GB"                 # GB is untouched
+    assert volume_text(int(3.5 * 1024 ** 3), 10 * 1024 ** 3) == "3.50/10GB"
+    assert volume_text(0, 0) == "0.00/0GB"                              # unlimited stays as it was
