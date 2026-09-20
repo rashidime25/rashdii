@@ -47,7 +47,7 @@ from . import tasks as bg
 from . import wg
 from .colo_map import describe_colo
 from .geo import detect_location, flag_from_code
-from .links import build_links, subscription_text
+from .links import build_links, subscription_text, volume_text
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
@@ -2840,9 +2840,9 @@ def _sub_headers_multi(name: str, users: list) -> dict:
 
 
 def _sub_status_link(name: str, users: list) -> str:
-    used = sum((u.get("used_up") or 0) + (u.get("used_down") or 0) for u in users) / (1024 ** 3)
-    quota = sum(u.get("quota_bytes") or 0 for u in users) / (1024 ** 3)
-    remark = f"TiTaN {name} | {used:.2f}/{quota:g}GB | {len(users)} users"
+    used_bytes = sum((u.get("used_up") or 0) + (u.get("used_down") or 0) for u in users)
+    quota_bytes = sum(u.get("quota_bytes") or 0 for u in users)
+    remark = f"TiTaN {name} | {volume_text(used_bytes, quota_bytes)} | {len(users)} users"
     return ("vless://00000000-0000-0000-0000-000000000001@127.0.0.1:10001?"
             f"encryption=none&security=none&type=tcp&headerType=none#{quote(remark)}")
 
