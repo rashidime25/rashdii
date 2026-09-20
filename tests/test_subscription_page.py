@@ -434,3 +434,21 @@ def test_a_small_volume_is_written_in_megabytes_everywhere_the_client_looks():
     assert volume_text(0, 10 * 1024 ** 3) == "0.00/10GB"                 # GB is untouched
     assert volume_text(int(3.5 * 1024 ** 3), 10 * 1024 ** 3) == "3.50/10GB"
     assert volume_text(0, 0) == "0.00/0GB"                              # unlimited stays as it was
+
+
+def test_the_page_declares_itself_dark_so_no_browser_filter_is_added(panel):
+    """Chrome on Android auto-darkens pages that do not say what they are.
+
+    That filter is applied by the browser on top of the page — no CSS inside the
+    page can remove it — which is a "layer" the admin can see on his phone while
+    nothing is wrong in the HTML. Declaring `color-scheme: dark` makes the
+    browser leave the page alone, and the page is dark anyway.
+    """
+    uid, _ = _user(panel, "scheme")
+    sub = _link(panel, [uid])
+    html = panel.get(f"/p/{sub['token']}").text
+    assert '<meta name="color-scheme" content="dark">' in html
+    assert "color-scheme:dark" in html
+    # and the canvas colour is the design's own navy, so the band a phone shows
+    # while the page is still loading cannot flash white either
+    assert '<meta name="theme-color" content="#03040d">' in html
