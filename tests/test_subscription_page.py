@@ -245,3 +245,49 @@ def test_the_builder_knows_each_users_picture(panel):
     panel.patch(f"/api/subscriptions/{sub['id']}", json={"avatar": ""}, headers=ORIGIN)
     d2 = panel.get(f"/p/{sub['token']}/data").json()
     assert d2["profile"]["kind"] == "user"
+
+def test_every_config_row_carries_a_flag_and_the_name_of_its_place(panel):
+    """The config list shows the server's flag and where it lands, by name."""
+    from app.main import _entry_place
+
+    # a node carries the place a config lands in; the panel carries its own
+    node_place = _entry_place({"target": "node", "node": {"name": "Dubai-Edge", "city": "Dubai",
+                                                          "country_code": "AE", "flag": "🇦🇪"}})
+    assert node_place == {"place": "Dubai-Edge", "city": "Dubai",
+                          "country_code": "ae", "flag": "🇦🇪"}
+    local_place = _entry_place({"target": "panel"})
+    assert local_place["country_code"] and local_place["place"]
+
+    uid, _ = _user(panel, "flagcity")
+    sub = _link(panel, [uid])
+    d = panel.get(f"/p/{sub['token']}/data").json()
+    for cfg in d["configs"]:
+        assert cfg["country_code"], "the page is told which country the config is in"
+        assert cfg["flag"] or cfg["country_code"], "so it can draw that country's flag"
+        assert cfg["city"] or cfg["place"], "and where the config really lands"
+        assert cfg["name"].startswith("TiTaN-")
+
+    # the page turns that into a flag image plus a named location, in both languages
+    html = panel.get(f"/p/{sub['token']}").text
+    assert "function flagUri" in html and "function locationLabel" in html
+    assert "CC_NAMES" in html and "آمریکا" in html and "United States" in html
+    assert "flagUri(c[0])" in html, "the row draws the flag of that country"
+    assert "esc(place)" in html and "esc(c[2])" in html, "and prints the place, not the code"
+    # the design's own flag artwork is reused for the countries it ships
+    assert '"us":"data:image/' in html and '"nl":"data:image/' in html and '"de":"data:image/' in html
+
+
+def test_the_page_never_paints_a_light_layer_over_the_uploaded_background(panel):
+    """The design's artwork is the background — nothing may wash it out."""
+    uid, _ = _user(panel, "bg")
+    sub = _link(panel, [uid])
+    html = panel.get(f"/p/{sub['token']}").text
+    body_rule = html[html.index("body{"):html.index("body{") + 400]
+    assert "linear-gradient(180deg,rgba(2,3,12,.08)" in body_rule, "the design's own veil, untouched"
+    # the artwork is declared as what it is: a JPEG (it was labelled image/png,
+    # which strict browsers refuse — the art vanished and only the veil stayed)
+    assert 'url("data:image/jpeg;base64,/9j/' in html
+    assert 'url("data:image/png;base64,/9j/' not in html
+    # and the page's base colour is the design's own --bg, never a white wash
+    assert "getPropertyValue('--bg')" in html and "document.body.style.backgroundColor" in html
+    assert "background:#fff" not in html.lower().replace(" ", "")
