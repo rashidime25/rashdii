@@ -122,3 +122,58 @@ def test_the_bridge_renders_every_section():
                        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "TITAN_REPO": str(REPO)})
     assert r.returncode == 0, r.stdout + r.stderr
     assert "bridge rendered every section" in r.stdout
+
+
+# ── the two things that were broken on a phone ───────────────────────────────
+
+def test_no_template_leaks_its_own_source_into_the_page():
+    """Nothing may follow `</html>`, and no markup may carry raw CSS.
+
+    A block of CSS was appended to the dashboard *after* `</html>`. A browser has
+    nowhere to put it except the body, so it painted thirty-odd lines of source
+    code under the panel — and, because one of those lines was a single unbreakable
+    string, the document became 521 px wide on a 360 px phone. Chrome then switched
+    that phone out of its mobile layout to fit the page, which shrank the whole
+    dashboard. One missing `</style>` and a document-wide layout change.
+    """
+    for template in sorted((REPO / "templates").glob("*.html")):
+        text = template.read_text(encoding="utf-8")
+        closes = list(re.finditer(r"</html\s*>", text, re.I))
+        assert closes, f"{template.name}: not a complete document"
+        tail = text[closes[-1].end():]
+        assert not tail.strip(), f"{template.name} carries {len(tail)} chars after </html>: {tail.strip()[:80]!r}"
+
+        # no `{prop:value}` pair may be sitting in text the browser would show
+        stripped = re.sub(r"<(style|script)\b[^>]*>.*?</\1\s*>", " ", text, flags=re.S | re.I)
+        stripped = re.sub(r"<!--.*?-->", " ", stripped, flags=re.S)
+        stripped = re.sub(r"<[^>]+>", " ", stripped)
+        leaks = re.findall(r"\{[^{}\n]{0,120}[:;][^{}\n]{0,120}\}", stripped)
+        assert not leaks, f"{template.name}: CSS is visible as body text: {leaks[:2]}"
+
+
+def test_the_dashboard_has_one_shipped_responsive_block():
+    assert '<style id="titan-responsive">' in DASHBOARD
+    block = DASHBOARD[DASHBOARD.index('<style id="titan-responsive">'):]
+    block = block[: block.index("</style>")]
+    for rule in (".header{height:auto", ".data-table,.subscription-table{min-width:0",
+                 "overflow-x:auto", "font-size:16px"):
+        assert rule in block, f"the phone layout lost {rule!r}"
+    # the tablet band between 760 and 1100 px used to fall through every media query
+    assert "@media (max-width:1100px)" in block
+
+
+def test_the_login_page_has_one_shipped_responsive_block():
+    login = (REPO / "templates" / "login.html").read_text(encoding="utf-8")
+    assert '<style id="titan-responsive">' in login
+    block = login[login.index('<style id="titan-responsive">'):]
+    block = block[: block.index("</style>")]
+    # the two panels are 563 + 542 px wide; between 901 and 1125 px they had no rule
+    assert "@media (min-width:901px) and (max-width:1125px)" in block
+    assert ".password input" in block, "a phone must not zoom when the password box is focused"
+
+
+def test_every_page_asks_for_the_notch_area():
+    for template in sorted((REPO / "templates").glob("*.html")):
+        viewport = re.search(r'<meta name="viewport" content="([^"]+)"', template.read_text(encoding="utf-8"))
+        assert viewport, f"{template.name}: no viewport meta"
+        assert "width=device-width" in viewport.group(1), template.name

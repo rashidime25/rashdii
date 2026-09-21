@@ -2,7 +2,7 @@
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>TiTaN — Private Network</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&display=swap');
@@ -710,6 +710,109 @@ button{cursor:pointer}
 .cfg-pick-name{font-size:11.5px;font-weight:700;color:var(--ink);direction:ltr}
 .cfg-pick-host{font-size:10px;color:var(--muted);direction:ltr;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style>
+
+<style id="titan-latency-and-subscription">
+/* The ping advisor rows and the subscription builder are drawn by
+   /static/js/titan-bridge.js; these are their styles. They used to sit at the
+   very end of the file, *after* </html>, where a browser has no choice but to
+   print them as body text -- the block of source code that appeared under the
+   page, and the 521-px-wide line that made a phone zoom the whole panel out. */
+/* ── latency advisor (پینگ‌سنج) ──────────────────────────────────────────────
+   Rows are filled from the admin's own browser, so the number is a real
+   client-side round trip and not the panel→node probe shown on the cards. */
+.lat-grid{display:grid;gap:8px}
+.lat-row{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid rgba(151,116,255,.22);border-radius:12px;background:linear-gradient(145deg,rgba(47,25,105,.28),rgba(11,8,30,.5))}
+.lat-name{flex:1;min-width:0;font-size:12px;color:#ded8ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lat-val{font-size:12px;color:#c9c4e6;white-space:nowrap;font-variant-numeric:tabular-nums}
+.lat-ms{font-size:15px;font-weight:700}
+.lat-ms.ok{color:#31dcb9}.lat-ms.mid{color:#d9b55f}.lat-ms.bad{color:#ff6b8a}.lat-ms.off{color:#8c88a8}
+.lat-tag{font-size:10.5px;white-space:nowrap}
+.lat-verdict{padding:11px 13px;border-radius:12px;border:1px solid rgba(151,116,255,.28);background:rgba(24,14,58,.5);font-size:11.5px;color:#c9c4e6;line-height:2.1}
+.lat-verdict b{color:#f0ecff}
+.lat-custom{display:flex;gap:8px;align-items:center}
+.lat-custom input{flex:1;min-width:0;padding:10px 12px;border-radius:11px;border:1px solid rgba(151,116,255,.24);background:rgba(9,7,26,.85);color:#efeaff;font-family:inherit;font-size:12px}
+.lat-spin{color:#a99bff}
+
+/* ── subscription builder + node detection ───────────────────────────────── */
+.sub-list{display:grid;gap:10px;max-height:46vh;overflow:auto;padding-inline-end:4px}
+.sub-user{border:1px solid rgba(151,116,255,.22);border-radius:13px;padding:10px 12px;background:linear-gradient(145deg,rgba(44,24,98,.28),rgba(11,8,30,.5))}
+.sub-user-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.sub-user-name{font-size:12.5px;color:#e6e1ff}
+.sub-user-head .spacer{flex:1}
+.sub-chips{display:flex;flex-wrap:wrap;gap:7px}
+.sub-chip{font-family:inherit;font-size:11px;cursor:pointer;padding:6px 11px;border-radius:999px;color:#b9b3d8;
+  border:1px solid rgba(137,91,255,.28);background:rgba(16,12,38,.85);transition:.16s}
+.sub-chip:hover{border-color:rgba(143,69,255,.6)}
+.sub-chip.on{color:#fff;border-color:rgba(49,220,185,.55);background:linear-gradient(135deg,rgba(26,120,102,.5),rgba(14,44,40,.75));box-shadow:0 8px 18px -12px rgba(49,220,185,.9)}
+.sub-summary{font-size:11.5px;color:#a8a6bf}
+.sub-url{display:flex;align-items:center;gap:8px;font-size:11px;color:#bdb8dc;justify-content:space-between;background:rgba(9,7,26,.75);border:1px solid rgba(137,91,255,.22);border-radius:11px;padding:8px 11px;overflow:auto}
+.sub-token{font-size:10px;margin-inline-start:6px}
+.sub-medal{background:linear-gradient(135deg,#7436f5,#3c189c);color:#fff;font-weight:700}
+.det-card{border:1px solid rgba(151,116,255,.26);border-radius:12px;padding:9px 12px;background:rgba(16,12,38,.7);margin-top:8px;font-size:11.5px;color:#c9c4e6}
+.det-row{display:flex;justify-content:space-between;gap:10px;padding:3px 0}
+.det-ok{color:#6ff0cd}.det-bad{color:#ff8fa6}
+</style>
+
+<style id="titan-responsive">
+/* ═══ Responsive pass — the dashboard on phones and tablets ═══════════════════
+   Written as size-aware overrides, so not one desktop rule changes. Each item
+   below came from loading the real dashboard at 320 … 1440 px and watching what
+   broke:
+     · the header only rearranged itself below 760 px, so a 768-px tablet had its
+       action buttons hanging off the right edge;
+     · the location text inside a server row could not shrink in its grid cell and
+       pushed out of the card between 760 and 1100 px;
+     · the data tables carry a 560–720 px min-width — they scroll inside their own
+       .table-scroll box now instead of widening the whole page;
+     · the four stat cards were forced into a single column below 430 px, which made
+       the dashboard four screens tall. Two-by-two is what the reference shows. */
+@media (max-width:1100px){
+  .header{height:auto;min-height:64px;display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:6px 0 0}
+  .actions{margin-top:0;justify-content:flex-end}
+  .server-row>*{min-width:0}
+  .server-row .location,.server-row .sr-loc{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .server-row .location>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .node-grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr))}
+}
+@media (max-width:1000px){
+  .actions{gap:8px;flex-wrap:wrap;min-width:0}
+  .profile{min-width:0}
+  .profile-copy{max-width:132px;min-width:0;overflow:hidden}
+  .profile-name,.profile-role{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+}
+@media (max-width:760px){
+  html,body{overflow-x:hidden}
+  .main{padding:0 12px 22px}
+  .header{min-height:56px;padding:2px 0 0;gap:6px}
+  .actions{gap:6px}
+  .welcome{padding:10px 2px 14px}
+  .stats{gap:10px}
+  .card{height:auto;min-height:118px}
+  .card-inner{padding:14px 13px;grid-template-columns:44px minmax(0,1fr);gap:0 9px;align-items:center}
+  .card-title{white-space:normal}
+  .table-scroll{max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}
+  .data-table,.subscription-table{min-width:0}
+  .data-table td,.data-table th{padding:10px 11px}
+  .detail-card,.recent-grid,.recent-panel,.section-view{max-width:100%;min-width:0}
+  .recent-panel{height:auto;min-height:190px;max-height:62vh}
+  .nl-metrics{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+  .nav-item{height:46px}
+}
+@media (max-width:430px){
+  .main{padding:0 10px calc(20px + env(safe-area-inset-bottom))}
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .card{min-height:104px}
+  .card-inner{padding:12px 11px;grid-template-columns:38px minmax(0,1fr);gap:0 8px}
+  .card-number{font-size:19px;margin-top:5px}
+  .card-meta{font-size:9px}
+  .card-icon{width:38px;height:38px}
+  .welcome h1{font-size:18px}
+  .sidebar{width:min(280px,84vw)}
+  #menu:checked ~ .mobile-toggle{left:calc(10px + min(280px,84vw) + 9px)}
+  input,select,textarea{font-size:16px}   /* below 16 px iOS zooms the page on focus */
+  .nl-metrics{gap:6px}
+}
+</style>
 </head>
 <body>
 <input type="checkbox" id="menu" hidden>
@@ -960,38 +1063,3 @@ button{cursor:pointer}
   <script src="/static/js/titan-bridge.js"></script>
 </body>
 </html>
-
-/* ── latency advisor (پینگ‌سنج) ──────────────────────────────────────────────
-   Rows are filled from the admin's own browser, so the number is a real
-   client-side round trip and not the panel→node probe shown on the cards. */
-.lat-grid{display:grid;gap:8px}
-.lat-row{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid rgba(151,116,255,.22);border-radius:12px;background:linear-gradient(145deg,rgba(47,25,105,.28),rgba(11,8,30,.5))}
-.lat-name{flex:1;min-width:0;font-size:12px;color:#ded8ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.lat-val{font-size:12px;color:#c9c4e6;white-space:nowrap;font-variant-numeric:tabular-nums}
-.lat-ms{font-size:15px;font-weight:700}
-.lat-ms.ok{color:#31dcb9}.lat-ms.mid{color:#d9b55f}.lat-ms.bad{color:#ff6b8a}.lat-ms.off{color:#8c88a8}
-.lat-tag{font-size:10.5px;white-space:nowrap}
-.lat-verdict{padding:11px 13px;border-radius:12px;border:1px solid rgba(151,116,255,.28);background:rgba(24,14,58,.5);font-size:11.5px;color:#c9c4e6;line-height:2.1}
-.lat-verdict b{color:#f0ecff}
-.lat-custom{display:flex;gap:8px;align-items:center}
-.lat-custom input{flex:1;min-width:0;padding:10px 12px;border-radius:11px;border:1px solid rgba(151,116,255,.24);background:rgba(9,7,26,.85);color:#efeaff;font-family:inherit;font-size:12px}
-.lat-spin{color:#a99bff}
-
-/* ── subscription builder + node detection ───────────────────────────────── */
-.sub-list{display:grid;gap:10px;max-height:46vh;overflow:auto;padding-inline-end:4px}
-.sub-user{border:1px solid rgba(151,116,255,.22);border-radius:13px;padding:10px 12px;background:linear-gradient(145deg,rgba(44,24,98,.28),rgba(11,8,30,.5))}
-.sub-user-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-.sub-user-name{font-size:12.5px;color:#e6e1ff}
-.sub-user-head .spacer{flex:1}
-.sub-chips{display:flex;flex-wrap:wrap;gap:7px}
-.sub-chip{font-family:inherit;font-size:11px;cursor:pointer;padding:6px 11px;border-radius:999px;color:#b9b3d8;
-  border:1px solid rgba(137,91,255,.28);background:rgba(16,12,38,.85);transition:.16s}
-.sub-chip:hover{border-color:rgba(143,69,255,.6)}
-.sub-chip.on{color:#fff;border-color:rgba(49,220,185,.55);background:linear-gradient(135deg,rgba(26,120,102,.5),rgba(14,44,40,.75));box-shadow:0 8px 18px -12px rgba(49,220,185,.9)}
-.sub-summary{font-size:11.5px;color:#a8a6bf}
-.sub-url{display:flex;align-items:center;gap:8px;font-size:11px;color:#bdb8dc;justify-content:space-between;background:rgba(9,7,26,.75);border:1px solid rgba(137,91,255,.22);border-radius:11px;padding:8px 11px;overflow:auto}
-.sub-token{font-size:10px;margin-inline-start:6px}
-.sub-medal{background:linear-gradient(135deg,#7436f5,#3c189c);color:#fff;font-weight:700}
-.det-card{border:1px solid rgba(151,116,255,.26);border-radius:12px;padding:9px 12px;background:rgba(16,12,38,.7);margin-top:8px;font-size:11.5px;color:#c9c4e6}
-.det-row{display:flex;justify-content:space-between;gap:10px;padding:3px 0}
-.det-ok{color:#6ff0cd}.det-bad{color:#ff8fa6}
