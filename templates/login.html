@@ -263,6 +263,35 @@ button:focus-visible,input:focus-visible{outline:2px solid rgba(145,108,255,.75)
   .support{grid-template-columns:1fr}
 }
 </style>
+
+<style id="titan-responsive">
+/* ═══ Responsive pass — the sign-in page ═══════════════════════════════════════
+   The two panels are 563 px and 542 px wide, and the rule that stacks them only
+   started at 900 px — so anything from 901 to 1125 px had no layout of its own and
+   the sign-in form hung off the right edge of the screen. They stack across that
+   whole gap now, and on a phone the fields are 16 px so iOS cannot zoom the page
+   the moment a password box takes focus. */
+@media (min-width:901px) and (max-width:1125px){
+  .page{align-items:flex-start;padding:18px 12px}
+  .stage{width:min(560px,94vw);height:auto;display:flex;flex-direction:column;gap:18px}
+  .panel{height:auto;min-height:560px;width:100%}
+  .support{grid-template-columns:1fr}
+}
+@media (max-width:560px){
+  .stage{width:100%}
+  .panel{border-radius:18px}
+  .password input,.field input{font-size:16px}
+  .langbtn{min-width:0;height:36px;padding:0 11px}
+  .password,.submit{height:54px}
+  .submit{margin-top:18px}
+  .support button{height:auto;min-height:56px;padding:10px 12px}
+  .page{padding-bottom:calc(18px + env(safe-area-inset-bottom))}
+}
+@media (max-width:390px){
+  .feature{height:auto;min-height:72px}
+  .support{grid-template-columns:1fr}
+}
+</style>
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute">
